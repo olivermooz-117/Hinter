@@ -4,8 +4,19 @@
   "description": "Hinter — a transparent, real-time AI meeting co-pilot",
   "main": "electron/main.js",
   "scripts": {
-    "start": "electron ."
+    "start": "electron .",
+    "dev": "electron . --enable-logging"
   },
+  "keywords": [
+    "electron",
+    "meeting",
+    "ai",
+    "transcription",
+    "co-pilot",
+    "overlay"
+  ],
+  "author": "olivermooz-117",
+  "license": "MIT",
   "devDependencies": {
     "electron": "^32.0.0"
   }
