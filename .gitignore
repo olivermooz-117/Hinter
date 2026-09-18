@@ -1,0 +1,15 @@
+node_modules/
+dist/
+out/
+build/
+.env
+.env.local
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.log
+npm-debug.log*
+release/
+*.webm
+node_modules/
