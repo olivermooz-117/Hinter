@@ -1,13 +1,11 @@
 /**
- * Streaming transcription service (placeholder).
+ * Transcription notes (Whisper is called from Electron main process for now).
  *
- * Planned providers: Deepgram Nova / AssemblyAI.
- * Input: raw audio chunks from electron/audio.js
- * Output: partial + final transcript events
+ * Current: OpenAI Whisper API via IPC (hinter:transcribe)
+ * Later:   move to Flask backend, or swap for Deepgram/AssemblyAI streaming
+ *
+ * Chunk size: ~4 seconds of audio (MediaRecorder in renderer)
  */
 module.exports = {
-  start: async () => {
-    throw new Error('Transcription service not implemented yet');
-  },
-  stop: async () => {},
+  // Placeholder — real work is in electron/main.js + renderer.js for this milestone
 };

@@ -83,11 +83,14 @@
     #transcript {
       flex: 1;
       font-size: 13px;
-      line-height: 1.5;
+      line-height: 1.45;
       color: #c8c8c8;
       overflow-y: auto;
       -webkit-app-region: no-drag;
       margin-bottom: 8px;
+    }
+    #transcript .line {
+      margin-bottom: 4px;
     }
     #suggestions {
       font-size: 12px;
@@ -118,7 +121,7 @@
     </div>
 
     <div id="transcript">
-      <span class="hint">Click “Start listening” to capture mic (and system audio when available).</span>
+      <span class="hint">Click “Start listening”. Speech will be transcribed every few seconds via Whisper.</span>
     </div>
 
     <div id="suggestions">
