@@ -1,0 +1,237 @@
+"""
+Hinter backend — Flask + SocketIO
+
+- Receives audio chunks → Whisper STT
+- Maintains rolling transcript buffer
+- Debounced LLM suggestions
+- SQLite session history via SQLAlchemy
+"""
+
+from __future__ import annotations
+
+import os
+import threading
+import time
+from datetime import datetime, timezone
+from pathlib import Path
+
+from dotenv import load_dotenv
+from flask import Flask, jsonify, request
+from flask_cors import CORS
+from flask_socketio import SocketIO, emit
+
+from models import Session, Suggestion, TranscriptLine, init_db
+from services.stt import transcribe_audio
+from services.suggestions import generate_suggestions
+
+# Load .env from project root (parent of backend/)
+ROOT = Path(__file__).resolve().parent.parent
+load_dotenv(ROOT / ".env")
+
+app = Flask(__name__)
+app.config["SECRET_KEY"] = os.environ.get("FLASK_SECRET", "hinter-dev-secret")
+CORS(app, origins="*")
+socketio = SocketIO(app, cors_allowed_origins="*", async_mode="eventlet")
+
+SessionLocal = init_db(str(ROOT / "data" / "hinter.db"))
+
+# In-memory rolling state (per process; fine for solo use)
+_state = {
+    "session_id": None,
+    "transcript": [],  # list[str]
+    "last_suggestion_at": 0.0,
+    "suggestion_lock": threading.Lock(),
+}
+SUGGESTION_DEBOUNCE_SEC = float(os.environ.get("HINTER_SUGGESTION_DEBOUNCE", "8"))
+
+
+def _ensure_session() -> int:
+    if _state["session_id"] is not None:
+        return _state["session_id"]
+    db = SessionLocal()
+    try:
+        s = Session(title=f"Meeting {datetime.now().strftime('%Y-%m-%d %H:%M')}")
+        db.add(s)
+        db.commit()
+        db.refresh(s)
+        _state["session_id"] = s.id
+        return s.id
+    finally:
+        db.close()
+
+
+def _save_transcript(text: str) -> None:
+    sid = _ensure_session()
+    db = SessionLocal()
+    try:
+        db.add(TranscriptLine(session_id=sid, text=text))
+        db.commit()
+    finally:
+        db.close()
+
+
+def _save_suggestion(text: str) -> None:
+    sid = _ensure_session()
+    db = SessionLocal()
+    try:
+        db.add(Suggestion(session_id=sid, text=text))
+        db.commit()
+    finally:
+        db.close()
+
+
+def _maybe_suggest() -> None:
+    """Debounced suggestion generation; runs in a background thread."""
+    with _state["suggestion_lock"]:
+        now = time.time()
+        if now - _state["last_suggestion_at"] < SUGGESTION_DEBOUNCE_SEC:
+            return
+        _state["last_suggestion_at"] = now
+        lines = list(_state["transcript"])
+
+    if not lines:
+        return
+
+    try:
+        text = generate_suggestions(lines)
+        if text and text != "(listening)":
+            _save_suggestion(text)
+            socketio.emit("suggestion", {"text": text})
+    except Exception as e:
+        socketio.emit("error", {"message": f"Suggestion error: {e}"})
+
+
+# ---------- HTTP ----------
+
+@app.get("/api/health")
+def health():
+    has_key = bool(os.environ.get("OPENAI_API_KEY", "").startswith("sk-"))
+    return jsonify({"ok": True, "openai_key": has_key, "session_id": _state["session_id"]})
+
+
+@app.post("/api/transcribe")
+def api_transcribe():
+    """Accept an audio file upload, run Whisper, push transcript + maybe suggestion."""
+    if "file" not in request.files and "audio" not in request.files:
+        # also accept raw body
+        audio = request.get_data()
+        filename = "chunk.webm"
+        if not audio or len(audio) < 500:
+            return jsonify({"error": "no audio"}), 400
+    else:
+        f = request.files.get("file") or request.files.get("audio")
+        audio = f.read()
+        filename = f.filename or "chunk.webm"
+        if len(audio) < 500:
+            return jsonify({"error": "audio too small"}), 400
+
+    try:
+        text = transcribe_audio(audio, filename=filename)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+    if text:
+        _state["transcript"].append(text)
+        if len(_state["transcript"]) > 200:
+            _state["transcript"] = _state["transcript"][-200:]
+        _save_transcript(text)
+        socketio.emit("transcript", {"text": text})
+        # fire suggestion in background
+        socketio.start_background_task(_maybe_suggest)
+
+    return jsonify({"text": text or ""})
+
+
+@app.post("/api/transcript")
+def api_transcript_text():
+    """Accept plain transcript text (if client still does local STT)."""
+    data = request.get_json(force=True, silent=True) or {}
+    text = (data.get("text") or "").strip()
+    if not text:
+        return jsonify({"error": "empty"}), 400
+
+    _state["transcript"].append(text)
+    if len(_state["transcript"]) > 200:
+        _state["transcript"] = _state["transcript"][-200:]
+    _save_transcript(text)
+    socketio.emit("transcript", {"text": text})
+    socketio.start_background_task(_maybe_suggest)
+    return jsonify({"ok": True})
+
+
+@app.get("/api/sessions")
+def list_sessions():
+    db = SessionLocal()
+    try:
+        rows = db.query(Session).order_by(Session.started_at.desc()).limit(50).all()
+        return jsonify(
+            [
+                {
+                    "id": s.id,
+                    "title": s.title,
+                    "started_at": s.started_at.isoformat() if s.started_at else None,
+                    "ended_at": s.ended_at.isoformat() if s.ended_at else None,
+                }
+                for s in rows
+            ]
+        )
+    finally:
+        db.close()
+
+
+@app.get("/api/sessions/<int:session_id>")
+def get_session(session_id: int):
+    db = SessionLocal()
+    try:
+        s = db.query(Session).get(session_id)
+        if not s:
+            return jsonify({"error": "not found"}), 404
+        return jsonify(
+            {
+                "id": s.id,
+                "title": s.title,
+                "started_at": s.started_at.isoformat() if s.started_at else None,
+                "transcripts": [{"text": t.text, "at": t.created_at.isoformat()} for t in s.transcripts],
+                "suggestions": [{"text": g.text, "at": g.created_at.isoformat()} for g in s.suggestions],
+            }
+        )
+    finally:
+        db.close()
+
+
+# ---------- SocketIO ----------
+
+@socketio.on("connect")
+def on_connect():
+    emit("status", {"message": "connected", "session_id": _state["session_id"]})
+
+
+@socketio.on("start_session")
+def on_start_session():
+    _state["session_id"] = None
+    _state["transcript"] = []
+    _state["last_suggestion_at"] = 0.0
+    sid = _ensure_session()
+    emit("status", {"message": "session_started", "session_id": sid})
+
+
+@socketio.on("end_session")
+def on_end_session():
+    if _state["session_id"] is None:
+        return
+    db = SessionLocal()
+    try:
+        s = db.query(Session).get(_state["session_id"])
+        if s:
+            s.ended_at = datetime.now(timezone.utc)
+            db.commit()
+    finally:
+        db.close()
+    emit("status", {"message": "session_ended", "session_id": _state["session_id"]})
+
+
+if __name__ == "__main__":
+    port = int(os.environ.get("HINTER_PORT", "5000"))
+    print(f"Hinter backend on http://127.0.0.1:{port}")
+    print(f"OpenAI key loaded: {bool(os.environ.get('OPENAI_API_KEY', '').startswith('sk-'))}")
+    socketio.run(app, host="127.0.0.1", port=port, debug=True)
