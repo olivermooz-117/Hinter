@@ -9,6 +9,7 @@ export function useBackend({ onSuggestion }) {
     kind: 'info',
   });
   const [backendOk, setBackendOk] = useState(false);
+  const [connectionState, setConnectionState] = useState('connecting');
   const socketRef = useRef(null);
 
   useEffect(() => {
@@ -33,19 +34,33 @@ export function useBackend({ onSuggestion }) {
         setStatus({ label: 'backend offline', kind: 'error' });
       });
 
-    const socket = io(BACKEND, { transports: ['websocket', 'polling'] });
+    const socket = io(BACKEND, {
+      transports: ['websocket', 'polling'],
+      reconnection: true,
+      reconnectionAttempts: 10,
+      reconnectionDelay: 1000,
+      reconnectionDelayMax: 5000,
+    });
     socketRef.current = socket;
-    socket.on('connect', () => socket.emit('start_session'));
+    
+    socket.on('connect', () => {
+      setConnectionState('connected');
+      socket.emit('start_session');
+    });
+    socket.on('disconnect', () => {
+      setConnectionState('disconnected');
+      setStatus({ label: 'backend offline', kind: 'error' });
+      setBackendOk(false);
+    });
+    socket.on('connect_error', () => {
+      setConnectionState('disconnected');
+    });
     socket.on('suggestion', (payload) => {
       if (payload?.text) onSuggestion?.(payload.text);
     });
     socket.on('error', (payload) => {
       console.error('backend error', payload);
       setStatus({ label: payload?.message || 'Suggestion error', kind: 'error' });
-    });
-    socket.on('disconnect', () => {
-      setStatus({ label: 'backend offline', kind: 'error' });
-      setBackendOk(false);
     });
 
     return () => {
@@ -71,5 +86,5 @@ export function useBackend({ onSuggestion }) {
     socketRef.current?.emit('end_session');
   };
 
-  return { status, setStatus, backendOk, pushTranscript, endSession };
+  return { status, setStatus, backendOk, pushTranscript, endSession, connectionState };
 }
