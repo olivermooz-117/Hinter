@@ -1,40 +1,64 @@
-"""Speech-to-text via OpenAI Whisper API."""
+"""
+Local speech-to-text via faster-whisper (Whisper models, runs offline).
+
+No OpenAI credits needed for transcription.
+Optional: WHISPER_MODEL=tiny.en|base.en|small.en (default base.en)
+"""
 
 from __future__ import annotations
 
-import io
 import os
+import tempfile
+from pathlib import Path
 
-from openai import OpenAI
+_model = None
+
+
+def _get_model():
+    global _model
+    if _model is not None:
+        return _model
+
+    from faster_whisper import WhisperModel
+
+    name = os.environ.get("WHISPER_MODEL", "base.en")
+    device = os.environ.get("WHISPER_DEVICE", "cpu")
+    compute = os.environ.get("WHISPER_COMPUTE", "int8")
+    print(f"Loading local Whisper model '{name}' ({device}/{compute})…")
+    _model = WhisperModel(name, device=device, compute_type=compute)
+    print("Whisper model ready.")
+    return _model
 
 
 def transcribe_audio(audio_bytes: bytes, filename: str = "chunk.webm") -> str:
-    """Send an audio blob to Whisper and return the transcript text."""
-    api_key = os.environ.get("OPENAI_API_KEY", "")
-    if not api_key.startswith("sk-"):
-        raise RuntimeError("OPENAI_API_KEY not set in environment / .env")
+    """Transcribe an audio blob with local Whisper. Returns text."""
+    if not audio_bytes or len(audio_bytes) < 500:
+        return ""
 
-    client = OpenAI(api_key=api_key)
+    suffix = Path(filename).suffix or ".webm"
+    if suffix.lower() not in {
+        ".webm", ".wav", ".mp3", ".mp4", ".m4a", ".ogg", ".mpeg", ".mpga",
+    }:
+        suffix = ".webm"
 
-    if not filename.lower().endswith(
-        (".webm", ".mp3", ".mp4", ".mpeg", ".mpga", ".m4a", ".wav", ".ogg")
-    ):
-        filename = "chunk.webm"
-
-    file_obj = io.BytesIO(audio_bytes)
-    file_obj.name = filename
-
+    tmp_path = None
     try:
-        result = client.audio.transcriptions.create(
-            model="whisper-1",
-            file=(filename, file_obj, "application/octet-stream"),
-            response_format="text",
-        )
-    except Exception as e:
-        raise RuntimeError(
-            f"Whisper failed ({len(audio_bytes)} bytes, {filename}): {e}"
-        ) from e
+        with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as f:
+            f.write(audio_bytes)
+            tmp_path = f.name
 
-    if isinstance(result, str):
-        return result.strip()
-    return (getattr(result, "text", None) or str(result)).strip()
+        model = _get_model()
+        segments, _info = model.transcribe(
+            tmp_path,
+            language="en",
+            beam_size=1,
+            vad_filter=True,
+        )
+        parts = [seg.text.strip() for seg in segments if seg.text and seg.text.strip()]
+        return " ".join(parts).strip()
+    finally:
+        if tmp_path and os.path.exists(tmp_path):
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
