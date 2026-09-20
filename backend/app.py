@@ -1,10 +1,9 @@
 """
 Hinter backend — Flask + SocketIO
 
-- Receives audio chunks → Whisper STT
-- Maintains rolling transcript buffer
-- Debounced LLM suggestions
-- SQLite session history via SQLAlchemy
+- Whisper STT via POST /api/transcribe
+- Rolling transcript → debounced LLM suggestions
+- SQLite session history
 """
 
 from __future__ import annotations
@@ -24,9 +23,8 @@ from models import Session, Suggestion, TranscriptLine, init_db
 from services.stt import transcribe_audio
 from services.suggestions import generate_suggestions
 
-# Load .env from project root (parent of backend/)
 ROOT = Path(__file__).resolve().parent.parent
-load_dotenv(ROOT / ".env")
+load_dotenv(ROOT / ".env" , override=True)
 
 app = Flask(__name__)
 app.config["SECRET_KEY"] = os.environ.get("FLASK_SECRET", "hinter-dev-secret")
@@ -35,10 +33,9 @@ socketio = SocketIO(app, cors_allowed_origins="*", async_mode="eventlet")
 
 SessionLocal = init_db(str(ROOT / "data" / "hinter.db"))
 
-# In-memory rolling state (per process; fine for solo use)
 _state = {
     "session_id": None,
-    "transcript": [],  # list[str]
+    "transcript": [],
     "last_suggestion_at": 0.0,
     "suggestion_lock": threading.Lock(),
 }
@@ -81,7 +78,6 @@ def _save_suggestion(text: str) -> None:
 
 
 def _maybe_suggest() -> None:
-    """Debounced suggestion generation; runs in a background thread."""
     with _state["suggestion_lock"]:
         now = time.time()
         if now - _state["last_suggestion_at"] < SUGGESTION_DEBOUNCE_SEC:
@@ -101,19 +97,22 @@ def _maybe_suggest() -> None:
         socketio.emit("error", {"message": f"Suggestion error: {e}"})
 
 
-# ---------- HTTP ----------
-
 @app.get("/api/health")
 def health():
-    has_key = bool(os.environ.get("OPENAI_API_KEY", "").startswith("sk-"))
-    return jsonify({"ok": True, "openai_key": has_key, "session_id": _state["session_id"]})
+    openai_key = bool(os.environ.get("OPENAI_API_KEY", "").startswith("sk-"))
+    return jsonify(
+        {
+            "ok": True,
+            "openai_key": openai_key,
+            "session_id": _state["session_id"],
+        }
+    )
 
 
 @app.post("/api/transcribe")
 def api_transcribe():
-    """Accept an audio file upload, run Whisper, push transcript + maybe suggestion."""
+    """Accept audio chunk → Whisper → transcript + maybe suggestion."""
     if "file" not in request.files and "audio" not in request.files:
-        # also accept raw body
         audio = request.get_data()
         filename = "chunk.webm"
         if not audio or len(audio) < 500:
@@ -136,7 +135,6 @@ def api_transcribe():
             _state["transcript"] = _state["transcript"][-200:]
         _save_transcript(text)
         socketio.emit("transcript", {"text": text})
-        # fire suggestion in background
         socketio.start_background_task(_maybe_suggest)
 
     return jsonify({"text": text or ""})
@@ -144,7 +142,6 @@ def api_transcribe():
 
 @app.post("/api/transcript")
 def api_transcript_text():
-    """Accept plain transcript text (if client still does local STT)."""
     data = request.get_json(force=True, silent=True) or {}
     text = (data.get("text") or "").strip()
     if not text:
@@ -191,15 +188,19 @@ def get_session(session_id: int):
                 "id": s.id,
                 "title": s.title,
                 "started_at": s.started_at.isoformat() if s.started_at else None,
-                "transcripts": [{"text": t.text, "at": t.created_at.isoformat()} for t in s.transcripts],
-                "suggestions": [{"text": g.text, "at": g.created_at.isoformat()} for g in s.suggestions],
+                "transcripts": [
+                    {"text": t.text, "at": t.created_at.isoformat()}
+                    for t in s.transcripts
+                ],
+                "suggestions": [
+                    {"text": g.text, "at": g.created_at.isoformat()}
+                    for g in s.suggestions
+                ],
             }
         )
     finally:
         db.close()
 
-
-# ---------- SocketIO ----------
 
 @socketio.on("connect")
 def on_connect():
@@ -233,5 +234,7 @@ def on_end_session():
 if __name__ == "__main__":
     port = int(os.environ.get("HINTER_PORT", "5000"))
     print(f"Hinter backend on http://127.0.0.1:{port}")
-    print(f"OpenAI key loaded: {bool(os.environ.get('OPENAI_API_KEY', '').startswith('sk-'))}")
+    print(
+        f"OpenAI key: {bool(os.environ.get('OPENAI_API_KEY', '').startswith('sk-'))}"
+    )
     socketio.run(app, host="127.0.0.1", port=port, debug=True)

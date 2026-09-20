@@ -1,38 +1,30 @@
 import { useCallback, useState } from 'react';
-import { useDeepgram } from './hooks/useDeepgram';
+import { useWhisper } from './hooks/useWhisper';
 import { useBackend } from './hooks/useBackend';
 
 export default function App() {
   const [lines, setLines] = useState([]);
-  const [interim, setInterim] = useState('');
   const [suggestion, setSuggestion] = useState('');
   const [busy, setBusy] = useState(false);
 
   const onSuggestion = useCallback((text) => setSuggestion(text), []);
-  const { status, setStatus, backendOk, pushTranscript, endSession } =
-    useBackend({ onSuggestion });
+  const { status, setStatus, backendOk, endSession } = useBackend({
+    onSuggestion,
+  });
 
-  const onTranscript = useCallback(
-    (text) => {
-      setLines((prev) => {
-        const next = [...prev, text].slice(-40);
-        return next;
-      });
-      setInterim('');
-      pushTranscript(text);
-    },
-    [pushTranscript]
-  );
+  const onTranscript = useCallback((text) => {
+    const cleaned = (text || '').trim();
+    if (!cleaned) return;
+    setLines((prev) => [...prev, cleaned].slice(-40));
+  }, []);
 
-  const onInterim = useCallback((text) => setInterim(text), []);
   const onError = useCallback(
     (msg) => setStatus({ label: msg || 'STT error', kind: 'error' }),
     [setStatus]
   );
 
-  const { listening, level, start, stop } = useDeepgram({
+  const { listening, level, start, stop } = useWhisper({
     onTranscript,
-    onInterim,
     onError,
   });
 
@@ -53,7 +45,7 @@ export default function App() {
     setBusy(true);
     try {
       await start();
-      setStatus({ label: 'listening (Deepgram)', kind: 'ready' });
+      setStatus({ label: 'listening (Whisper)', kind: 'ready' });
     } catch (err) {
       setStatus({ label: err.message || 'mic/STT error', kind: 'error' });
     } finally {
@@ -85,20 +77,17 @@ export default function App() {
       </div>
 
       <div className="transcript">
-        {lines.length === 0 && !interim ? (
+        {lines.length === 0 ? (
           <span className="hint">
-            Start the Flask backend, set DEEPGRAM_API_KEY + OPENAI_API_KEY in
-            .env, then click Start listening.
+            Backend running + OPENAI_API_KEY in .env, then Start listening.
+            Speech appears every few seconds via Whisper.
           </span>
         ) : (
-          <>
-            {lines.map((line, i) => (
-              <div className="line" key={`${i}-${line.slice(0, 12)}`}>
-                {line}
-              </div>
-            ))}
-            {interim ? <div className="line interim">{interim}</div> : null}
-          </>
+          lines.map((line, i) => (
+            <div className="line" key={`${i}-${line.slice(0, 12)}`}>
+              {line}
+            </div>
+          ))
         )}
       </div>
 
