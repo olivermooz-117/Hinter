@@ -45,7 +45,7 @@ export default function App() {
     setBusy(true);
     try {
       await start();
-      setStatus({ label: 'listening (Whisper)', kind: 'ready' });
+      setStatus({ label: 'listening', kind: 'ready' });
     } catch (err) {
       setStatus({ label: err.message || 'mic/STT error', kind: 'error' });
     } finally {
@@ -57,7 +57,7 @@ export default function App() {
     <div className="overlay">
       <div className="header">
         <div className="title">
-          <span>🔎</span>
+          <span className="mark" />
           <span>Hinter</span>
         </div>
         <span className={`status ${status.kind}`}>{status.label}</span>
@@ -69,18 +69,18 @@ export default function App() {
           onClick={toggle}
           disabled={busy}
         >
-          {busy ? 'Starting…' : listening ? 'Stop listening' : 'Start listening'}
+          {busy ? 'Starting…' : listening ? 'Stop' : 'Listen'}
         </button>
         <div className="level-wrap">
           <div className="level-bar" style={{ width: `${level}%` }} />
         </div>
       </div>
 
+      <div className="panel-label">Live transcript</div>
       <div className="transcript">
         {lines.length === 0 ? (
           <span className="hint">
-            Backend running + OPENAI_API_KEY in .env, then Start listening.
-            Speech appears every few seconds via Whisper.
+            Backend running + OPENAI_API_KEY in .env, then hit Listen.
           </span>
         ) : (
           lines.map((line, i) => (
@@ -91,6 +91,7 @@ export default function App() {
         )}
       </div>
 
+      <div className="panel-label">Assist</div>
       <div className="suggestions">
         {suggestion || (
           <span className="hint">Suggestions will appear here.</span>
