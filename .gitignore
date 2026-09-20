@@ -20,7 +20,7 @@ Thumbs.db
 .env
 .env.local
 .env.*.local
-
+.env.example
 # Editor
 .vscode/
 .idea/
