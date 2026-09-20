@@ -2,7 +2,10 @@
 Local speech-to-text via faster-whisper (Whisper models, runs offline).
 
 No OpenAI credits needed for transcription.
-Optional: WHISPER_MODEL=tiny.en|base.en|small.en (default base.en)
+Optional:
+  WHISPER_MODEL_SIZE=tiny.en|base.en|small.en (default base.en)
+  WHISPER_LANGUAGE=en|de|fr|... (default en)
+  WHISPER_VAD=true|false (default true)
 """
 
 from __future__ import annotations
@@ -21,11 +24,11 @@ def _get_model():
 
     from faster_whisper import WhisperModel
 
-    name = os.environ.get("WHISPER_MODEL", "base.en")
+    MODEL_SIZE = os.getenv("WHISPER_MODEL_SIZE", "base.en")
     device = os.environ.get("WHISPER_DEVICE", "cpu")
     compute = os.environ.get("WHISPER_COMPUTE", "int8")
-    print(f"Loading local Whisper model '{name}' ({device}/{compute})…")
-    _model = WhisperModel(name, device=device, compute_type=compute)
+    print(f"Loading local Whisper model '{MODEL_SIZE}' ({device}/{compute})…")
+    _model = WhisperModel(MODEL_SIZE, device=device, compute_type=compute)
     print("Whisper model ready.")
     return _model
 
@@ -48,11 +51,13 @@ def transcribe_audio(audio_bytes: bytes, filename: str = "chunk.webm") -> str:
             tmp_path = f.name
 
         model = _get_model()
+        LANGUAGE = os.getenv("WHISPER_LANGUAGE", "en")
+        VAD_FILTER = os.getenv("WHISPER_VAD", "true").lower() == "true"
         segments, _info = model.transcribe(
             tmp_path,
-            language="en",
+            language=LANGUAGE,
             beam_size=1,
-            vad_filter=True,
+            vad_filter=VAD_FILTER,
         )
         parts = [seg.text.strip() for seg in segments if seg.text and seg.text.strip()]
         return " ".join(parts).strip()
