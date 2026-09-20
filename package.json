@@ -7,8 +7,11 @@
     "dev": "concurrently -k \"vite\" \"wait-on http://127.0.0.1:5173 && cross-env HINTER_DEV=1 electron .\"",
     "start": "electron .",
     "build": "vite build",
+    "test": "vitest run",
+    "test:watch": "vitest",
     "backend": "cd backend && python app.py",
-    "backend:install": "cd backend && pip install -r requirements.txt"
+    "backend:install": "cd backend && pip install -r requirements.txt",
+    "backend:test": "cd backend && python -m pytest -v"
   },
   "dependencies": {
     "react": "^18.3.1",
@@ -19,9 +22,13 @@
     "@vitejs/plugin-react": "^4.3.1",
     "concurrently": "^9.0.1",
     "cross-env": "^7.0.3",
-    "electron": "^31.0.0",
+    "electron": "^28.0.0",
     "vite": "^5.4.0",
-    "wait-on": "^8.0.1"
+    "vitest": "^2.0.0",
+    "wait-on": "^8.0.1",
+    "@testing-library/react": "^16.0.0",
+    "@testing-library/jest-dom": "^6.4.0",
+    "jsdom": "^24.0.0"
   },
   "author": "olivermooz-117",
   "license": "MIT"
