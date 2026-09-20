@@ -39,6 +39,10 @@ export function useBackend({ onSuggestion }) {
     socket.on('suggestion', (payload) => {
       if (payload?.text) onSuggestion?.(payload.text);
     });
+    socket.on('error', (payload) => {
+      console.error('backend error', payload);
+      setStatus({ label: payload?.message || 'Suggestion error', kind: 'error' });
+    });
     socket.on('disconnect', () => {
       setStatus({ label: 'backend offline', kind: 'error' });
       setBackendOk(false);
