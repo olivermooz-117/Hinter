@@ -1,0 +1,26 @@
+{
+  "name": "hinter",
+  "version": "0.2.0",
+  "description": "Hinter — a transparent, real-time AI meeting co-pilot",
+  "main": "electron/main.js",
+  "scripts": {
+    "start": "electron .",
+    "dev": "electron . --enable-logging",
+    "backend": "cd backend && python app.py",
+    "backend:install": "cd backend && pip install -r requirements.txt"
+  },
+  "keywords": [
+    "electron",
+    "meeting",
+    "ai",
+    "transcription",
+    "co-pilot",
+    "overlay",
+    "flask"
+  ],
+  "author": "olivermooz-117",
+  "license": "MIT",
+  "devDependencies": {
+    "electron": "^32.0.0"
+  }
+}

@@ -1,0 +1,38 @@
+# Dependencies
+node_modules/
+
+# Build / dist
+dist/
+out/
+*.dmg
+*.exe
+*.AppImage
+
+# Logs & debug
+*.log
+npm-debug.log*
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Env / secrets
+.env
+.env.local
+.env.*.local
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Audio test captures (will be generated in later milestones)
+recordings/
+*.wav
+*.webm
+*.mp3
+
+# Session history (future)
+data/
+sessions/
