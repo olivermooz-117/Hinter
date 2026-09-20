@@ -2,7 +2,7 @@
 
 **A transparent, real-time AI meeting co-pilot.**
 
-Hinter is an always-on-top overlay that listens to your meeting (system audio + mic), transcribes it live, and surfaces short, useful suggestions. It is designed to be **disclosed and openly used**, like Otter.ai or Google Meet’s AI features.
+Hinter is an always-on-top overlay that listens to your meeting (system audio + mic), transcribes it live, and surfaces short, useful suggestions. It is designed to be **disclosed and openly used**, like Otter.ai or Google Meet's AI features.
 
 ---
 
@@ -11,12 +11,13 @@ Hinter is an always-on-top overlay that listens to your meeting (system audio + 
 | Milestone | Status |
 |-----------|--------|
 | Floating always-on-top overlay | ✅ Done |
-| Audio capture (mic + system) | ✅ Done |
+| Audio capture (mic) | ✅ Done |
+| System audio capture | Planned (desktopCapturer + PulseAudio/PipeWire loopback, platform-dependent) |
 | Live transcription (Whisper) | ✅ Done |
-| Flask backend + WebSocket | Next |
-| LLM suggestion engine | Planned |
-| React UI migration | Later |
-| Session history (SQLAlchemy) | Later |
+| Flask backend + WebSocket | ✅ Done |
+| LLM suggestion engine | ✅ Done (GPT-4o-mini, debounced) |
+| React UI migration | ✅ Done (vanilla-JS renderer removed) |
+| Session history (SQLAlchemy) | ✅ Done |
 
 ---
 
@@ -32,3 +33,4 @@ cp .env.example .env
 
 # 3. Start
 npm start
+```
