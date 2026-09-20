@@ -28,7 +28,7 @@ load_dotenv(ROOT / ".env" , override=True)
 
 app = Flask(__name__)
 app.config["SECRET_KEY"] = os.environ.get("FLASK_SECRET", "hinter-dev-secret")
-CORS(app, origins="*")
+CORS(app, resources={r"/api/*": {"origins": "http://127.0.0.1:5173"}})
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode="threading")
 
 SessionLocal = init_db(str(ROOT / "data" / "hinter.db"))
