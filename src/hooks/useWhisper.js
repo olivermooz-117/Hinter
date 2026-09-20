@@ -1,18 +1,42 @@
-import { useCallback, useRef, useState } from 'react';
+import { useCallback, useRef, useState, useEffect } from 'react';
 
 const BACKEND = 'http://127.0.0.1:5000';
 const CHUNK_MS = 4000;
 
+function getHinterAPI() {
+  if (typeof window !== 'undefined' && window.hinter) {
+    return window.hinter;
+  }
+  return null;
+}
+
 export function useWhisper({ onTranscript, onError }) {
   const [listening, setListening] = useState(false);
   const [level, setLevel] = useState(0);
+  const [systemAudioState, setSystemAudioState] = useState('idle');
 
   const streamRef = useRef(null);
+  const systemStreamRef = useRef(null);
   const ctxRef = useRef(null);
   const analyserRef = useRef(null);
   const rafRef = useRef(null);
   const recorderRef = useRef(null);
   const timerRef = useRef(null);
+
+  useEffect(() => {
+    const api = getHinterAPI();
+    if (api?.systemAudio?.listMonitors) {
+      api.systemAudio.listMonitors().then((monitors) => {
+        if (!monitors || monitors.length === 0) {
+          setSystemAudioState('unavailable');
+        }
+      }).catch(() => {
+        setSystemAudioState('unavailable');
+      });
+    } else {
+      setSystemAudioState('unavailable');
+    }
+  }, []);
 
   const stopLevelMeter = useCallback(() => {
     if (rafRef.current) cancelAnimationFrame(rafRef.current);
@@ -82,23 +106,74 @@ export function useWhisper({ onTranscript, onError }) {
       streamRef.current.getTracks().forEach((t) => t.stop());
       streamRef.current = null;
     }
+    if (systemStreamRef.current) {
+      systemStreamRef.current.getTracks().forEach((t) => t.stop());
+      systemStreamRef.current = null;
+    }
     stopLevelMeter();
     setListening(false);
-  }, [stopLevelMeter]);
+    if (systemAudioState === 'capturing') {
+      setSystemAudioState('idle');
+    }
+  }, [stopLevelMeter, systemAudioState]);
 
   const start = useCallback(async () => {
     stop();
 
-    const stream = await navigator.mediaDevices.getUserMedia({
-      audio: {
-        echoCancellation: true,
-        noiseSuppression: true,
-        autoGainControl: true,
-      },
-      video: false,
-    });
-    streamRef.current = stream;
-    startLevelMeter(stream);
+    let micStream;
+    try {
+      micStream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
+        },
+        video: false,
+      });
+    } catch (err) {
+      onError?.(err.message || 'Microphone access denied');
+      throw err;
+    }
+    streamRef.current = micStream;
+
+    let combinedStream = micStream;
+    const api = getHinterAPI();
+    if (api?.systemAudio?.getSourceId && systemAudioState !== 'unavailable') {
+      try {
+        setSystemAudioState('capturing');
+        const monitors = await api.systemAudio.listMonitors();
+        if (monitors && monitors.length > 0) {
+          const { sourceId } = await api.systemAudio.getSourceId(monitors[0]);
+          const systemStream = await navigator.mediaDevices.getUserMedia({
+            audio: {
+              mandatory: {
+                chromeMediaSource: 'desktop',
+                chromeMediaSourceId: sourceId,
+              },
+            },
+            video: false,
+          });
+          systemStreamRef.current = systemStream;
+          const audioCtx = new AudioContext();
+          const micSource = audioCtx.createMediaStreamSource(micStream);
+          const systemSource = audioCtx.createMediaStreamSource(systemStream);
+          const destination = audioCtx.createMediaStreamDestination();
+          micSource.connect(destination);
+          systemSource.connect(destination);
+          combinedStream = destination.stream;
+          startLevelMeter(combinedStream);
+        } else {
+          setSystemAudioState('unavailable');
+          startLevelMeter(micStream);
+        }
+      } catch (err) {
+        console.error('System audio capture failed:', err);
+        setSystemAudioState('error');
+        startLevelMeter(micStream);
+      }
+    } else {
+      startLevelMeter(micStream);
+    }
 
     const mimeCandidates = [
       'audio/webm;codecs=opus',
@@ -114,7 +189,7 @@ export function useWhisper({ onTranscript, onError }) {
     }
 
     const recorder = new MediaRecorder(
-      stream,
+      combinedStream,
       mimeType ? { mimeType } : undefined
     );
     recorderRef.current = recorder;
@@ -138,7 +213,7 @@ export function useWhisper({ onTranscript, onError }) {
     }, CHUNK_MS);
 
     setListening(true);
-  }, [stop, startLevelMeter, sendChunk, onError]);
+  }, [stop, startLevelMeter, sendChunk, onError, systemAudioState]);
 
-  return { listening, level, start, stop };
+  return { listening, level, start, stop, systemAudioState };
 }
