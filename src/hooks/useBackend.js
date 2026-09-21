@@ -42,7 +42,7 @@ export function useBackend({ onSuggestion }) {
       reconnectionDelayMax: 5000,
     });
     socketRef.current = socket;
-    
+
     socket.on('connect', () => {
       setConnectionState('connected');
       socket.emit('start_session');
@@ -59,6 +59,10 @@ export function useBackend({ onSuggestion }) {
       if (payload?.text) onSuggestion?.(payload.text);
     });
     socket.on('error', (payload) => {
+      if (payload?.error === 'quota') {
+        onSuggestion?.(payload.message);
+        return;
+      }
       console.error('backend error', payload);
       setStatus({ label: payload?.message || 'Suggestion error', kind: 'error' });
     });

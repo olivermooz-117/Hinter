@@ -24,7 +24,7 @@ from services.stt import transcribe_audio
 from services.suggestions import generate_suggestions
 
 ROOT = Path(__file__).resolve().parent.parent
-load_dotenv(ROOT / ".env" , override=True)
+load_dotenv(ROOT / ".env", override=True)
 
 app = Flask(__name__)
 app.config["SECRET_KEY"] = os.environ.get("FLASK_SECRET", "hinter-dev-secret")
@@ -77,6 +77,20 @@ def _save_suggestion(text: str) -> None:
         db.close()
 
 
+def _is_quota_error(error: Exception) -> bool:
+    """Identify OpenAI quota/credit errors without exposing their raw payload."""
+    status = getattr(error, "status_code", None) or getattr(error, "status", None)
+    details = " ".join(
+        str(value)
+        for value in (error, getattr(error, "body", None), getattr(error, "code", None))
+        if value is not None
+    ).lower()
+    return status == 429 or any(
+        marker in details
+        for marker in ("insufficient_quota", "credit_balance_exhausted", "quota exceeded")
+    )
+
+
 def _maybe_suggest() -> None:
     with _state["suggestion_lock"]:
         now = time.time()
@@ -94,7 +108,17 @@ def _maybe_suggest() -> None:
             _save_suggestion(text)
             socketio.emit("suggestion", {"text": text})
     except Exception as e:
-        socketio.emit("error", {"message": f"Suggestion error: {e}"})
+        if _is_quota_error(e):
+            socketio.emit(
+                "error",
+                {
+                    "text": None,
+                    "error": "quota",
+                    "message": "Suggestions need OpenAI credits. Transcription still works offline.",
+                },
+            )
+        else:
+            socketio.emit("error", {"message": f"Suggestion error: {e}"})
 
 
 @app.get("/api/health")
