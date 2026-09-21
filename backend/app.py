@@ -78,7 +78,7 @@ def _save_suggestion(text: str) -> None:
 
 
 def _is_quota_error(error: Exception) -> bool:
-    """Identify OpenAI quota/credit errors without exposing their raw payload."""
+    """Identify provider quota errors without exposing the raw payload."""
     status = getattr(error, "status_code", None) or getattr(error, "status", None)
     details = " ".join(
         str(value)
@@ -114,7 +114,7 @@ def _maybe_suggest() -> None:
                 {
                     "text": None,
                     "error": "quota",
-                    "message": "Suggestions need OpenAI credits. Transcription still works offline.",
+                    "message": "Suggestion quota was reached; transcription still works.",
                 },
             )
         else:
@@ -123,11 +123,13 @@ def _maybe_suggest() -> None:
 
 @app.get("/api/health")
 def health():
-    openai_key = bool(os.environ.get("OPENAI_API_KEY", "").startswith("sk-"))
+    gemini_key = bool(os.environ.get("GEMINI_API_KEY", "").strip())
     return jsonify(
         {
             "ok": True,
-            "openai_key": openai_key,
+            "gemini_key": gemini_key,
+            "openai_key": False,
+            "deepgram_key": False,
             "session_id": _state["session_id"],
         }
     )
@@ -259,6 +261,6 @@ if __name__ == "__main__":
     port = int(os.environ.get("HINTER_PORT", "5000"))
     print(f"Hinter backend on http://127.0.0.1:{port}")
     print(
-        f"OpenAI key: {bool(os.environ.get('OPENAI_API_KEY', '').startswith('sk-'))}"
+        f"Gemini key: {bool(os.environ.get('GEMINI_API_KEY', '').strip())}"
     )
     socketio.run(app, host="127.0.0.1", port=port, debug=True)

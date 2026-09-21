@@ -59,7 +59,7 @@ describe('App', () => {
 
   it('shows hint when no transcripts', () => {
     render(<App />);
-    expect(screen.getByText('Backend running + OPENAI_API_KEY in .env, then hit Listen.')).toBeInTheDocument();
+    expect(screen.getByText('Backend running + GEMINI_API_KEY in .env, then hit Listen.')).toBeInTheDocument();
   });
 
   it('shows suggestion hint when no suggestions', () => {

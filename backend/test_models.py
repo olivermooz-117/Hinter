@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 
 sys.path.insert(0, os.path.dirname(__file__))
 
-os.environ.setdefault("OPENAI_API_KEY", "sk-test-key")
+os.environ.setdefault("GEMINI_API_KEY", "test-gemini-key")
 os.environ.setdefault("HINTER_SUGGESTION_DEBOUNCE", "0")
 
 _tmp_db = tempfile.NamedTemporaryFile(suffix=".db", delete=False)

@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 from typing import List
 
-from openai import OpenAI
+from services.gemini_client import get_gemini_client
 
 SYSTEM_PROMPT = """You are Hinter, a transparent AI meeting co-pilot.
 You receive a rolling transcript of a live meeting. Your job is to suggest
@@ -22,25 +22,39 @@ Rules:
 
 def generate_suggestions(transcript_window: List[str]) -> str:
     """Given recent transcript lines, return short suggestion text."""
-    api_key = os.environ.get("OPENAI_API_KEY", "")
-    if not api_key.startswith("sk-"):
-        raise RuntimeError("OPENAI_API_KEY not set")
+    if not transcript_window:
+        return "(listening)"
 
-    window = "\n".join(transcript_window[-30:]).strip()
+    window = "\n".join(str(part).strip() for part in transcript_window[-30:] if str(part).strip())
     if not window:
         return "(listening)"
 
-    client = OpenAI(api_key=api_key)
-    model = os.environ.get("HINTER_LLM_MODEL", "gpt-4o-mini")
+    client = get_gemini_client()
+    model = os.environ.get("GEMINI_SUGGESTION_MODEL", "gemini-2.5-flash")
 
-    response = client.chat.completions.create(
+    response = client.models.generate_content(
         model=model,
-        messages=[
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": f"Transcript so far:\n\n{window}\n\nSuggestions:"},
+        contents=[
+            {
+                "role": "user",
+                "parts": [
+                    {"text": f"{SYSTEM_PROMPT}\n\nTranscript so far:\n\n{window}\n\nSuggestions:"}
+                ],
+            }
         ],
-        max_tokens=120,
-        temperature=0.4,
     )
-    text = (response.choices[0].message.content or "").strip()
+
+    text = getattr(response, "text", None)
+    if text is None:
+        text = getattr(response, "candidates", None)
+        if isinstance(text, list) and text:
+            content = getattr(text[0], "content", None)
+            if content is not None:
+                parts = getattr(content, "parts", None) or []
+                values = []
+                for part in parts:
+                    if getattr(part, "text", None):
+                        values.append(part.text)
+                text = "".join(values)
+    text = (text or "").strip()
     return text or "(listening)"

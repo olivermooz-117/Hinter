@@ -22,8 +22,8 @@ export function useBackend({ onSuggestion }) {
         setBackendOk(!!data.ok);
         if (!data.ok) {
           setStatus({ label: 'backend error', kind: 'error' });
-        } else if (!data.openai_key && !data.deepgram_key) {
-          setStatus({ label: 'ready (no API keys)', kind: 'warn' });
+        } else if (!data.gemini_key) {
+          setStatus({ label: 'ready (no Gemini API key)', kind: 'warn' });
         } else {
           setStatus({ label: 'ready', kind: 'ready' });
         }

@@ -18,7 +18,7 @@ describe('useBackend', () => {
     vi.clearAllMocks();
     global.fetch.mockResolvedValue({
       ok: true,
-      json: () => Promise.resolve({ ok: true, openai_key: true }),
+      json: () => Promise.resolve({ ok: true, gemini_key: true }),
     });
   });
 

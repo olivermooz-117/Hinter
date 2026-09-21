@@ -26,12 +26,24 @@ const mockMediaRecorder = {
   ondataavailable: null,
 };
 
+function installElectronSystemAudio(monitors = ['alsa_output.test.monitor']) {
+  window.hinter = {
+    systemAudio: {
+      listMonitors: vi.fn().mockResolvedValue(monitors),
+      startCapture: vi.fn().mockResolvedValue({ sourceName: monitors[0] }),
+    },
+  };
+  navigator.mediaDevices.getDisplayMedia = vi.fn().mockResolvedValue(mockMediaStream);
+}
+
 describe('useWhisper', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     global.navigator.mediaDevices = {
       getUserMedia: vi.fn().mockResolvedValue(mockMediaStream),
+      getDisplayMedia: vi.fn(),
     };
+    delete window.hinter;
     global.AudioContext = vi.fn(() => mockAudioContext);
     global.MediaRecorder = vi.fn(() => mockMediaRecorder);
     global.MediaRecorder.isTypeSupported = vi.fn(() => true);
@@ -100,5 +112,44 @@ describe('useWhisper', () => {
     });
 
     expect(onError).toHaveBeenCalledWith('Permission denied');
+  });
+
+  it('captures system audio through Electron display media and mixes it with the mic', async () => {
+    installElectronSystemAudio();
+    const { result } = renderHook(() =>
+      useWhisper({ onTranscript: vi.fn(), onError: vi.fn() })
+    );
+
+    await act(async () => {
+      await result.current.start();
+    });
+
+    expect(window.hinter.systemAudio.startCapture).toHaveBeenCalledWith(
+      'alsa_output.test.monitor'
+    );
+    expect(navigator.mediaDevices.getDisplayMedia).toHaveBeenCalledWith({
+      audio: true,
+      video: true,
+    });
+    expect(mockAudioContext.createMediaStreamDestination).toHaveBeenCalled();
+  });
+
+  it('falls back to microphone-only capture when system audio fails', async () => {
+    installElectronSystemAudio();
+    navigator.mediaDevices.getDisplayMedia.mockRejectedValueOnce(
+      new Error('loopback unavailable')
+    );
+    const onError = vi.fn();
+    const { result } = renderHook(() =>
+      useWhisper({ onTranscript: vi.fn(), onError })
+    );
+
+    await act(async () => {
+      await result.current.start();
+    });
+
+    expect(result.current.listening).toBe(true);
+    expect(onError).not.toHaveBeenCalled();
+    expect(mockMediaRecorder.start).toHaveBeenCalled();
   });
 });

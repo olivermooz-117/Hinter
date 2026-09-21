@@ -1,12 +1,4 @@
-"""
-Local speech-to-text via faster-whisper (Whisper models, runs offline).
-
-No OpenAI credits needed for transcription.
-Optional:
-  WHISPER_MODEL_SIZE=tiny.en|base.en|small.en (default base.en)
-  WHISPER_LANGUAGE=en|de|fr|... (default en)
-  WHISPER_VAD=true|false (default true)
-"""
+"""Speech-to-text using the Google Gemini API."""
 
 from __future__ import annotations
 
@@ -14,53 +6,66 @@ import os
 import tempfile
 from pathlib import Path
 
-_model = None
+from services.gemini_client import get_gemini_client
 
 
-def _get_model():
-    global _model
-    if _model is not None:
-        return _model
-
-    from faster_whisper import WhisperModel
-
-    MODEL_SIZE = os.getenv("WHISPER_MODEL_SIZE", "base.en")
-    device = os.environ.get("WHISPER_DEVICE", "cpu")
-    compute = os.environ.get("WHISPER_COMPUTE", "int8")
-    print(f"Loading local Whisper model '{MODEL_SIZE}' ({device}/{compute})…")
-    _model = WhisperModel(MODEL_SIZE, device=device, compute_type=compute)
-    print("Whisper model ready.")
-    return _model
+def _resolve_mime_type(filename: str, fallback: str = "audio/webm") -> str:
+    suffix = (Path(filename).suffix or ".webm").lower()
+    mime_map = {
+        ".webm": "audio/webm",
+        ".wav": "audio/wav",
+        ".mp3": "audio/mpeg",
+        ".mp4": "audio/mp4",
+        ".m4a": "audio/mp4",
+        ".ogg": "audio/ogg",
+        ".mpeg": "audio/mpeg",
+        ".mpga": "audio/mpeg",
+    }
+    return mime_map.get(suffix, fallback)
 
 
 def transcribe_audio(audio_bytes: bytes, filename: str = "chunk.webm") -> str:
-    """Transcribe an audio blob with local Whisper. Returns text."""
+    """Transcribe an audio blob with Gemini's transcription API."""
     if not audio_bytes or len(audio_bytes) < 500:
         return ""
 
-    suffix = Path(filename).suffix or ".webm"
-    if suffix.lower() not in {
-        ".webm", ".wav", ".mp3", ".mp4", ".m4a", ".ogg", ".mpeg", ".mpga",
-    }:
-        suffix = ".webm"
+    client = get_gemini_client()
+    mime_type = _resolve_mime_type(filename)
 
     tmp_path = None
     try:
-        with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as f:
+        with tempfile.NamedTemporaryFile(suffix=Path(filename).suffix or ".webm", delete=False) as f:
             f.write(audio_bytes)
             tmp_path = f.name
 
-        model = _get_model()
-        LANGUAGE = os.getenv("WHISPER_LANGUAGE", "en")
-        VAD_FILTER = os.getenv("WHISPER_VAD", "true").lower() == "true"
-        segments, _info = model.transcribe(
-            tmp_path,
-            language=LANGUAGE,
-            beam_size=1,
-            vad_filter=VAD_FILTER,
+        file_obj = client.files.upload(file=tmp_path, config={"mime_type": mime_type})
+        response = client.models.generate_content(
+            model="gemini-3.5-transcribe",
+            contents=[
+                {
+                    "role": "user",
+                    "parts": [
+                        {"text": "Transcribe the spoken audio exactly as it is spoken."},
+                        {"file": file_obj},
+                    ],
+                }
+            ],
         )
-        parts = [seg.text.strip() for seg in segments if seg.text and seg.text.strip()]
-        return " ".join(parts).strip()
+        text = getattr(response, "text", None)
+        if text is None:
+            text = getattr(response, "candidates", None)
+            if isinstance(text, list) and text:
+                text = getattr(text[0], "content", None)
+                if text is not None:
+                    parts = getattr(text, "parts", None) or []
+                    values = []
+                    for part in parts:
+                        if getattr(part, "text", None):
+                            values.append(part.text)
+                    text = "".join(values)
+        if not text:
+            return ""
+        return str(text).strip()
     finally:
         if tmp_path and os.path.exists(tmp_path):
             try:

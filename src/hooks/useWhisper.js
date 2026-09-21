@@ -17,6 +17,7 @@ export function useWhisper({ onTranscript, onError }) {
 
   const streamRef = useRef(null);
   const systemStreamRef = useRef(null);
+  const mixCtxRef = useRef(null);
   const ctxRef = useRef(null);
   const analyserRef = useRef(null);
   const rafRef = useRef(null);
@@ -44,6 +45,10 @@ export function useWhisper({ onTranscript, onError }) {
     if (ctxRef.current) {
       ctxRef.current.close().catch(() => {});
       ctxRef.current = null;
+    }
+    if (mixCtxRef.current) {
+      mixCtxRef.current.close().catch(() => {});
+      mixCtxRef.current = null;
     }
     analyserRef.current = null;
     setLevel(0);
@@ -138,23 +143,26 @@ export function useWhisper({ onTranscript, onError }) {
 
     let combinedStream = micStream;
     const api = getHinterAPI();
-    if (api?.systemAudio?.getSourceId && systemAudioState !== 'unavailable') {
+    if (api?.systemAudio?.startCapture && systemAudioState !== 'unavailable') {
       try {
         setSystemAudioState('capturing');
         const monitors = await api.systemAudio.listMonitors();
         if (monitors && monitors.length > 0) {
-          const { sourceId } = await api.systemAudio.getSourceId(monitors[0]);
-          const systemStream = await navigator.mediaDevices.getUserMedia({
-            audio: {
-              mandatory: {
-                chromeMediaSource: 'desktop',
-                chromeMediaSourceId: sourceId,
-              },
-            },
-            video: false,
+          await api.systemAudio.startCapture(monitors[0]);
+          if (!navigator.mediaDevices.getDisplayMedia) {
+            throw new Error('Electron display-media capture is unavailable');
+          }
+          const systemStream = await navigator.mediaDevices.getDisplayMedia({
+            audio: true,
+            video: true,
           });
+          if (!systemStream.getAudioTracks().length) {
+            systemStream.getTracks().forEach((track) => track.stop());
+            throw new Error('Electron returned no system-audio track');
+          }
           systemStreamRef.current = systemStream;
           const audioCtx = new AudioContext();
+          mixCtxRef.current = audioCtx;
           const micSource = audioCtx.createMediaStreamSource(micStream);
           const systemSource = audioCtx.createMediaStreamSource(systemStream);
           const destination = audioCtx.createMediaStreamDestination();
@@ -167,7 +175,7 @@ export function useWhisper({ onTranscript, onError }) {
           startLevelMeter(micStream);
         }
       } catch (err) {
-        console.error('System audio capture failed:', err);
+        console.warn('[system-audio] unavailable; using microphone only:', err);
         setSystemAudioState('error');
         startLevelMeter(micStream);
       }
@@ -188,10 +196,24 @@ export function useWhisper({ onTranscript, onError }) {
       }
     }
 
-    const recorder = new MediaRecorder(
-      combinedStream,
-      mimeType ? { mimeType } : undefined
-    );
+    if (typeof MediaRecorder === 'undefined') {
+      stop();
+      const error = new Error('MediaRecorder is unavailable in this Electron environment');
+      onError?.(error.message);
+      throw error;
+    }
+
+    let recorder;
+    try {
+      recorder = new MediaRecorder(
+        combinedStream,
+        mimeType ? { mimeType } : undefined
+      );
+    } catch (err) {
+      stop();
+      onError?.(err.message || 'Unable to create audio recorder');
+      throw err;
+    }
     recorderRef.current = recorder;
 
     recorder.ondataavailable = async (event) => {

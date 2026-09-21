@@ -35,19 +35,25 @@ function detectMonitorSources() {
   if (process.platform !== 'linux') {
     return true;
   }
+  return listLinuxMonitorSources().length > 0;
+}
+
+function listLinuxMonitorSources() {
+  if (process.platform !== 'linux') return [];
+
+  const monitors = [];
   try {
     const pactlOut = execSync('pactl list short sources', { encoding: 'utf8', timeout: 2000 });
-    if (/\.monitor\s/.test(pactlOut)) {
-      return true;
+    for (const line of pactlOut.trim().split('\n')) {
+      const parts = line.split('\t');
+      if (parts.length >= 2 && parts[1].endsWith('.monitor')) {
+        monitors.push(parts[1]);
+      }
     }
-  } catch (_) {}
-  try {
-    const pwOut = execSync('pw-cli list-objects', { encoding: 'utf8', timeout: 2000 });
-    if (/monitor/i.test(pwOut)) {
-      return true;
-    }
-  } catch (_) {}
-  return false;
+  } catch (error) {
+    console.warn('[system-audio] pactl monitor detection failed:', error.message);
+  }
+  return monitors;
 }
 
 function createOverlayWindow() {
@@ -90,15 +96,16 @@ app.whenReady().then(() => {
 
   session.defaultSession.setDisplayMediaRequestHandler(
     (request, callback) => {
-      if (process.platform === 'linux') {
-        if (SYSTEM_AUDIO_AVAILABLE) {
-          callback({ video: null, audio: 'loopback' });
-        } else {
-          callback({ video: null, audio: false });
-        }
-      } else {
-        callback({ video: null, audio: 'loopback' });
-      }
+      console.info('[system-audio] display media request', {
+        platform: process.platform,
+        available: SYSTEM_AUDIO_AVAILABLE,
+        audioRequested: request.audio,
+        videoRequested: request.video,
+      });
+      callback({
+        video: null,
+        audio: SYSTEM_AUDIO_AVAILABLE ? 'loopback' : false,
+      });
     },
     { useSystemPicker: true }
   );
@@ -125,30 +132,8 @@ app.on('window-all-closed', () => {
 ipcMain.handle('hinter:ping', () => 'pong from main process');
 
 ipcMain.handle('system-audio:list-monitors', async () => {
-  if (process.platform !== 'linux') {
-    return [];
-  }
-  const monitors = [];
-  try {
-    const pactlOut = execSync('pactl list short sources', { encoding: 'utf8', timeout: 2000 });
-    for (const line of pactlOut.trim().split('\n')) {
-      const parts = line.split('\t');
-      if (parts.length >= 2 && parts[1].endsWith('.monitor')) {
-        monitors.push(parts[1]);
-      }
-    }
-  } catch (_) {}
-  if (monitors.length === 0) {
-    try {
-      const pwOut = execSync('pw-cli list-objects', { encoding: 'utf8', timeout: 2000 });
-      for (const line of pwOut.trim().split('\n')) {
-        if (/monitor/i.test(line)) {
-          const match = line.match(/name\s*=\s*"([^"]+)"/);
-          if (match) monitors.push(match[1]);
-        }
-      }
-    } catch (_) {}
-  }
+  const monitors = listLinuxMonitorSources();
+  console.info('[system-audio] monitor sources:', monitors);
   return monitors;
 });
 
@@ -156,11 +141,10 @@ ipcMain.handle('system-audio:start-capture', async (_event, sourceName) => {
   if (process.platform !== 'linux') {
     throw new Error('System audio capture only implemented for Linux in this build');
   }
-  const { desktopCapturer } = require('electron');
-  const sources = await desktopCapturer.getSources({ types: ['screen', 'window'] });
-  const target = sources.find((s) => s.name === sourceName || s.id.includes(sourceName));
-  if (!target) {
-    throw new Error(`Monitor source not found: ${sourceName}`);
+  const monitors = listLinuxMonitorSources();
+  if (!sourceName || !monitors.includes(sourceName)) {
+    throw new Error(`Monitor source is no longer available: ${sourceName || '(none)'}`);
   }
-  return { sourceId: target.id };
+  console.info('[system-audio] requesting loopback for monitor:', sourceName);
+  return { sourceName };
 });

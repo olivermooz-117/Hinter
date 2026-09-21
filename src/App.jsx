@@ -80,7 +80,7 @@ export default function App() {
       <div className="transcript">
         {lines.length === 0 ? (
           <span className="hint">
-            Backend running + OPENAI_API_KEY in .env, then hit Listen.
+            Backend running + GEMINI_API_KEY in .env, then hit Listen.
           </span>
         ) : (
           lines.map((line, i) => (

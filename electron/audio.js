@@ -9,13 +9,8 @@ async function listMonitorSources() {
 }
 
 /**
- * Requests a desktopCapturer source ID for the given monitor source name.
- * The caller (renderer) must then use this sourceId with getUserMedia:
- *   const stream = await navigator.mediaDevices.getUserMedia({
- *     audio: { mandatory: { chromeMediaSource: 'desktop', chromeMediaSourceId: sourceId } },
- *     video: false
- *   });
- * Returns { sourceId: string } on success, throws on failure.
+ * Validates the monitor and enables the Electron display-media loopback path.
+ * The renderer must request the actual stream with getDisplayMedia().
  */
 async function startSystemAudioCapture(sourceName) {
   return ipcRenderer.invoke('system-audio:start-capture', sourceName);
