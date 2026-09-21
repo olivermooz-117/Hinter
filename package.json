@@ -9,9 +9,9 @@
     "build": "vite build",
     "test": "vitest run",
     "test:watch": "vitest",
-    "backend": "cd backend && python app.py",
+    "backend": "cd backend && if [ -x venv/bin/python3 ]; then venv/bin/python3 app.py; else python3 app.py; fi",
     "backend:install": "cd backend && pip install -r requirements.txt",
-    "backend:test": "cd backend && python -m pytest -v"
+    "backend:test": "cd backend && if [ -x venv/bin/python3 ]; then venv/bin/python3 -m pytest -v; else python3 -m pytest -v; fi"
   },
   "dependencies": {
     "react": "^18.3.1",

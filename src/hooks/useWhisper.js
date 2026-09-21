@@ -1,6 +1,6 @@
 import { useCallback, useRef, useState, useEffect } from 'react';
+import { BACKEND_URL } from '../config';
 
-const BACKEND = 'http://127.0.0.1:5000';
 const CHUNK_MS = 4000;
 
 function getHinterAPI() {
@@ -78,7 +78,7 @@ export function useWhisper({ onTranscript, onError }) {
     async (blob) => {
       const form = new FormData();
       form.append('file', blob, 'chunk.webm');
-      const res = await fetch(`${BACKEND}/api/transcribe`, {
+      const res = await fetch(`${BACKEND_URL}/api/transcribe`, {
         method: 'POST',
         body: form,
       });

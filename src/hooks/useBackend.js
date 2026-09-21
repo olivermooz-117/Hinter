@@ -1,7 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { io } from 'socket.io-client';
-
-const BACKEND = 'http://127.0.0.1:5000';
+import { BACKEND_URL } from '../config';
 
 export function useBackend({ onSuggestion }) {
   const [status, setStatus] = useState({
@@ -15,7 +14,7 @@ export function useBackend({ onSuggestion }) {
   useEffect(() => {
     let cancelled = false;
 
-    fetch(`${BACKEND}/api/health`)
+    fetch(`${BACKEND_URL}/api/health`)
       .then((r) => r.json())
       .then((data) => {
         if (cancelled) return;
@@ -34,7 +33,7 @@ export function useBackend({ onSuggestion }) {
         setStatus({ label: 'backend offline', kind: 'error' });
       });
 
-    const socket = io(BACKEND, {
+    const socket = io(BACKEND_URL, {
       transports: ['websocket', 'polling'],
       reconnection: true,
       reconnectionAttempts: 10,
@@ -76,7 +75,7 @@ export function useBackend({ onSuggestion }) {
   const pushTranscript = async (text) => {
     if (!text?.trim()) return;
     try {
-      await fetch(`${BACKEND}/api/transcript`, {
+      await fetch(`${BACKEND_URL}/api/transcript`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ text }),

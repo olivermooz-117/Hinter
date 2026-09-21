@@ -29,6 +29,16 @@ def test_health_endpoint():
     data = r.get_json()
     assert data["ok"] is True
     assert data["gemini_key"] is True
+    assert "openai_key" not in data
+    assert "deepgram_key" not in data
+
+
+def test_health_accepts_configured_frontend_origin():
+    import app
+    client = app.app.test_client()
+    r = client.get("/api/health", headers={"Origin": "http://127.0.0.1:5173"})
+    assert r.status_code == 200
+    assert r.headers["Access-Control-Allow-Origin"] == "http://127.0.0.1:5173"
 
 
 def test_transcript_endpoint():

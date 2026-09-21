@@ -36,6 +36,36 @@ npm run backend
 npm start
 ```
 
+## Deployment
+
+The web frontend is deployed to Vercel and the Flask + Socket.IO backend is
+deployed to Render. Electron remains a local desktop application and uses the
+same backend URL configuration.
+
+Render uses:
+
+```text
+Build command: pip install -r backend/requirements.txt
+Start command: cd backend && python app.py
+```
+
+Configure these environment variables in Render. `PORT` is supplied by Render:
+
+```text
+GEMINI_API_KEY=...
+GEMINI_SUGGESTION_MODEL=gemini-2.5-flash
+FRONTEND_URL=https://your-app.vercel.app
+```
+
+Configure this environment variable in Vercel:
+
+```text
+VITE_BACKEND_URL=https://your-backend.onrender.com
+```
+
+The actual Gemini API key belongs only in Render. It must not be placed in a
+`VITE_*` variable or shipped to React, Vite, or the Electron renderer.
+
 ## Data flow
 
 ```text

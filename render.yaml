@@ -1,0 +1,13 @@
+services:
+  - type: web
+    name: hinter-backend
+    runtime: python
+    buildCommand: pip install -r backend/requirements.txt
+    startCommand: cd backend && python app.py
+    envVars:
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: GEMINI_SUGGESTION_MODEL
+        value: gemini-2.5-flash
+      - key: FRONTEND_URL
+        sync: false

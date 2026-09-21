@@ -1,7 +1,7 @@
 """
 Hinter backend — Flask + SocketIO
 
-- Whisper STT via POST /api/transcribe
+ - Gemini STT via POST /api/transcribe
 - Rolling transcript → debounced LLM suggestions
 - SQLite session history
 """
@@ -24,12 +24,21 @@ from services.stt import transcribe_audio
 from services.suggestions import generate_suggestions
 
 ROOT = Path(__file__).resolve().parent.parent
-load_dotenv(ROOT / ".env", override=True)
+load_dotenv(ROOT / ".env")
+
+DEFAULT_FRONTEND_URL = "http://127.0.0.1:5173"
+frontend_origins = [
+    origin.strip()
+    for origin in os.environ.get("FRONTEND_URL", DEFAULT_FRONTEND_URL).split(",")
+    if origin.strip()
+]
+if not os.environ.get("FRONTEND_URL"):
+    frontend_origins.append("http://localhost:5173")
 
 app = Flask(__name__)
 app.config["SECRET_KEY"] = os.environ.get("FLASK_SECRET", "hinter-dev-secret")
-CORS(app, resources={r"/api/*": {"origins": "http://127.0.0.1:5173"}})
-socketio = SocketIO(app, cors_allowed_origins="*", async_mode="threading")
+CORS(app, resources={r"/api/*": {"origins": frontend_origins}})
+socketio = SocketIO(app, cors_allowed_origins=frontend_origins, async_mode="threading")
 
 SessionLocal = init_db(str(ROOT / "data" / "hinter.db"))
 
@@ -128,8 +137,6 @@ def health():
         {
             "ok": True,
             "gemini_key": gemini_key,
-            "openai_key": False,
-            "deepgram_key": False,
             "session_id": _state["session_id"],
         }
     )
@@ -258,9 +265,11 @@ def on_end_session():
 
 
 if __name__ == "__main__":
-    port = int(os.environ.get("HINTER_PORT", "5000"))
-    print(f"Hinter backend on http://127.0.0.1:{port}")
+    host = os.environ.get("HOST", "0.0.0.0")
+    port = int(os.environ.get("PORT") or os.environ.get("HINTER_PORT", "5000"))
+    debug = os.environ.get("HINTER_DEBUG", "0").lower() in {"1", "true", "yes"}
+    print(f"Hinter backend on http://{host}:{port}")
     print(
         f"Gemini key: {bool(os.environ.get('GEMINI_API_KEY', '').strip())}"
     )
-    socketio.run(app, host="127.0.0.1", port=port, debug=True)
+    socketio.run(app, host=host, port=port, debug=debug)
