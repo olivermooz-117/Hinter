@@ -8,7 +8,7 @@ export default function App() {
   const [busy, setBusy] = useState(false);
 
   const onSuggestion = useCallback((text) => setSuggestion(text), []);
-  const { status, setStatus, backendOk, endSession } = useBackend({
+  const { status, setStatus, backendOk, endSession, socket } = useBackend({
     onSuggestion,
   });
 
@@ -26,6 +26,7 @@ export default function App() {
   const { listening, level, start, stop } = useWhisper({
     onTranscript,
     onError,
+    socket,
   });
 
   const toggle = async () => {

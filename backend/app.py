@@ -21,6 +21,7 @@ from flask_socketio import SocketIO, emit
 
 from models import Session, Suggestion, TranscriptLine, init_db
 from services.stt import transcribe_audio
+from services.live_transcription import LiveTranscriptionSession
 from services.suggestions import generate_suggestions
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -47,6 +48,7 @@ _state = {
     "transcript": [],
     "last_suggestion_at": 0.0,
     "suggestion_lock": threading.Lock(),
+    "live_sessions": {},
 }
 SUGGESTION_DEBOUNCE_SEC = float(os.environ.get("HINTER_SUGGESTION_DEBOUNCE", "8"))
 
@@ -128,6 +130,22 @@ def _maybe_suggest() -> None:
             )
         else:
             socketio.emit("error", {"message": f"Suggestion error: {e}"})
+
+
+def _handle_live_transcription(sid: str, text: str, final: bool) -> None:
+    if not final or not text:
+        socketio.emit("transcription_interim", {"text": text}, to=sid)
+        return
+
+    _state["transcript"].append(text)
+    _state["transcript"] = _state["transcript"][-200:]
+    _save_transcript(text)
+    socketio.emit("transcript", {"text": text}, to=sid)
+    socketio.start_background_task(_maybe_suggest)
+
+
+def _handle_live_error(sid: str, message: str) -> None:
+    socketio.emit("transcription_error", {"message": message}, to=sid)
 
 
 @app.get("/api/health")
@@ -262,6 +280,45 @@ def on_end_session():
     finally:
         db.close()
     emit("status", {"message": "session_ended", "session_id": _state["session_id"]})
+
+
+@socketio.on("transcription:start")
+def on_transcription_start():
+    sid = request.sid
+    existing = _state["live_sessions"].pop(sid, None)
+    if existing:
+        existing.stop()
+    session = LiveTranscriptionSession(
+        lambda text, final: _handle_live_transcription(sid, text, final),
+        lambda message: _handle_live_error(sid, message),
+    )
+    _state["live_sessions"][sid] = session
+    session.start()
+    emit("transcription:started")
+
+
+@socketio.on("transcription:audio")
+def on_transcription_audio(audio):
+    session = _state["live_sessions"].get(request.sid)
+    if not session or not isinstance(audio, (bytes, bytearray)):
+        emit("transcription_error", {"message": "Live transcription is not active."})
+        return
+    session.send_audio(bytes(audio))
+
+
+@socketio.on("transcription:stop")
+def on_transcription_stop():
+    session = _state["live_sessions"].pop(request.sid, None)
+    if session:
+        session.stop()
+    emit("transcription:stopped")
+
+
+@socketio.on("disconnect")
+def on_disconnect():
+    session = _state["live_sessions"].pop(request.sid, None)
+    if session:
+        session.stop()
 
 
 if __name__ == "__main__":

@@ -9,7 +9,10 @@ export function useBackend({ onSuggestion }) {
   });
   const [backendOk, setBackendOk] = useState(false);
   const [connectionState, setConnectionState] = useState('connecting');
+  const [socket, setSocket] = useState(null);
   const socketRef = useRef(null);
+  const onSuggestionRef = useRef(onSuggestion);
+  onSuggestionRef.current = onSuggestion;
 
   useEffect(() => {
     let cancelled = false;
@@ -41,6 +44,7 @@ export function useBackend({ onSuggestion }) {
       reconnectionDelayMax: 5000,
     });
     socketRef.current = socket;
+    setSocket(socket);
 
     socket.on('connect', () => {
       setConnectionState('connected');
@@ -55,11 +59,11 @@ export function useBackend({ onSuggestion }) {
       setConnectionState('disconnected');
     });
     socket.on('suggestion', (payload) => {
-      if (payload?.text) onSuggestion?.(payload.text);
+      if (payload?.text) onSuggestionRef.current?.(payload.text);
     });
     socket.on('error', (payload) => {
       if (payload?.error === 'quota') {
-        onSuggestion?.(payload.message);
+        onSuggestionRef.current?.(payload.message);
         return;
       }
       console.error('backend error', payload);
@@ -70,7 +74,7 @@ export function useBackend({ onSuggestion }) {
       cancelled = true;
       socket.disconnect();
     };
-  }, [onSuggestion]);
+  }, []);
 
   const pushTranscript = async (text) => {
     if (!text?.trim()) return;
@@ -89,5 +93,5 @@ export function useBackend({ onSuggestion }) {
     socketRef.current?.emit('end_session');
   };
 
-  return { status, setStatus, backendOk, pushTranscript, endSession, connectionState };
+  return { status, setStatus, backendOk, pushTranscript, endSession, connectionState, socket };
 }

@@ -7,15 +7,24 @@ const mockMediaStream = {
   getAudioTracks: () => [{ stop: vi.fn() }],
 };
 
+const mockSystemAudioStream = {
+  getTracks: () => [{ stop: vi.fn() }],
+  getAudioTracks: () => [{ stop: vi.fn() }],
+};
+
 const mockAudioContext = {
-  createMediaStreamSource: vi.fn(() => ({ connect: vi.fn() })),
+  createMediaStreamSource: vi.fn(() => ({
+    connect: vi.fn(),
+  })),
   createAnalyser: vi.fn(() => ({
     fftSize: 256,
     frequencyBinCount: 128,
     getByteFrequencyData: vi.fn(),
     connect: vi.fn(),
   })),
-  createMediaStreamDestination: vi.fn(() => ({ stream: mockMediaStream })),
+  createMediaStreamDestination: vi.fn(() => ({
+    stream: mockMediaStream,
+  })),
   close: vi.fn().mockResolvedValue(undefined),
 };
 
@@ -26,49 +35,83 @@ const mockMediaRecorder = {
   ondataavailable: null,
 };
 
-function installElectronSystemAudio(monitors = ['alsa_output.test.monitor']) {
+function installElectronSystemAudio() {
   window.hinter = {
     systemAudio: {
-      listMonitors: vi.fn().mockResolvedValue(monitors),
-      startCapture: vi.fn().mockResolvedValue({ sourceName: monitors[0] }),
+      listMonitors: vi
+        .fn()
+        .mockResolvedValue(['alsa_output.test.monitor']),
+      startCapture: vi.fn().mockResolvedValue({
+        sourceName: 'alsa_output.test.monitor',
+      }),
     },
   };
-  navigator.mediaDevices.getDisplayMedia = vi.fn().mockResolvedValue(mockMediaStream);
+
+  navigator.mediaDevices.enumerateDevices = vi.fn().mockResolvedValue([
+    {
+      kind: 'audioinput',
+      label: 'Built-in Audio Analog Stereo',
+      deviceId: 'mic-device-id',
+      groupId: 'mic-group-id',
+    },
+    {
+      kind: 'audioinput',
+      label: 'Hinter-System-Audio',
+      deviceId: 'system-audio-device-id',
+      groupId: 'system-audio-group-id',
+    },
+  ]);
 }
 
 describe('useWhisper', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+
     global.navigator.mediaDevices = {
       getUserMedia: vi.fn().mockResolvedValue(mockMediaStream),
-      getDisplayMedia: vi.fn(),
+      enumerateDevices: vi.fn().mockResolvedValue([]),
     };
+
     delete window.hinter;
+
     global.AudioContext = vi.fn(() => mockAudioContext);
+
     global.MediaRecorder = vi.fn(() => mockMediaRecorder);
+
     global.MediaRecorder.isTypeSupported = vi.fn(() => true);
+
     global.fetch = vi.fn().mockResolvedValue({
       ok: true,
       json: () => Promise.resolve({ text: 'test transcript' }),
     });
+
     global.requestAnimationFrame = vi.fn(() => 1);
     global.cancelAnimationFrame = vi.fn();
-    global.setInterval = vi.fn((cb) => cb());
+
+    global.setInterval = vi.fn(() => 1);
     global.clearInterval = vi.fn();
   });
 
   it('initializes with listening=false', () => {
     const { result } = renderHook(() =>
-      useWhisper({ onTranscript: vi.fn(), onError: vi.fn() })
+      useWhisper({
+        onTranscript: vi.fn(),
+        onError: vi.fn(),
+      })
     );
+
     expect(result.current.listening).toBe(false);
     expect(result.current.level).toBe(0);
   });
 
   it('start sets listening to true', async () => {
     const onTranscript = vi.fn();
+
     const { result } = renderHook(() =>
-      useWhisper({ onTranscript, onError: vi.fn() })
+      useWhisper({
+        onTranscript,
+        onError: vi.fn(),
+      })
     );
 
     await act(async () => {
@@ -81,7 +124,10 @@ describe('useWhisper', () => {
 
   it('stop sets listening to false', async () => {
     const { result } = renderHook(() =>
-      useWhisper({ onTranscript: vi.fn(), onError: vi.fn() })
+      useWhisper({
+        onTranscript: vi.fn(),
+        onError: vi.fn(),
+      })
     );
 
     await act(async () => {
@@ -97,51 +143,82 @@ describe('useWhisper', () => {
 
   it('calls onError when getUserMedia fails', async () => {
     const onError = vi.fn();
-    navigator.mediaDevices.getUserMedia.mockRejectedValueOnce(new Error('Permission denied'));
+
+    navigator.mediaDevices.getUserMedia.mockRejectedValueOnce(
+      new Error('Permission denied')
+    );
 
     const { result } = renderHook(() =>
-      useWhisper({ onTranscript: vi.fn(), onError })
+      useWhisper({
+        onTranscript: vi.fn(),
+        onError,
+      })
     );
 
     await act(async () => {
       try {
         await result.current.start();
-      } catch (e) {
-        // expected
+      } catch (error) {
+        // Expected.
       }
     });
 
     expect(onError).toHaveBeenCalledWith('Permission denied');
   });
 
-  it('captures system audio through Electron display media and mixes it with the mic', async () => {
+  it('captures Hinter-System-Audio and mixes it with the microphone', async () => {
     installElectronSystemAudio();
+
     const { result } = renderHook(() =>
-      useWhisper({ onTranscript: vi.fn(), onError: vi.fn() })
+      useWhisper({
+        onTranscript: vi.fn(),
+        onError: vi.fn(),
+      })
     );
 
     await act(async () => {
       await result.current.start();
     });
 
-    expect(window.hinter.systemAudio.startCapture).toHaveBeenCalledWith(
-      'alsa_output.test.monitor'
-    );
-    expect(navigator.mediaDevices.getDisplayMedia).toHaveBeenCalledWith({
-      audio: true,
-      video: true,
-    });
-    expect(mockAudioContext.createMediaStreamDestination).toHaveBeenCalled();
+    expect(navigator.mediaDevices.enumerateDevices).toHaveBeenCalled();
+
+    expect(navigator.mediaDevices.getUserMedia).toHaveBeenCalledWith({
+  audio: {
+    deviceId: {
+      exact: 'system-audio-device-id',
+    },
+    channelCount: 2,
+    sampleRate: 48000,
+    echoCancellation: false,
+    noiseSuppression: false,
+    autoGainControl: false,
+  },
+  video: false,
+});
+
+    expect(mockAudioContext.createMediaStreamSource).toHaveBeenCalled();
+
+    expect(
+      mockAudioContext.createMediaStreamDestination
+    ).toHaveBeenCalled();
+
+    expect(result.current.listening).toBe(true);
   });
 
   it('falls back to microphone-only capture when system audio fails', async () => {
     installElectronSystemAudio();
-    navigator.mediaDevices.getDisplayMedia.mockRejectedValueOnce(
-      new Error('loopback unavailable')
-    );
+
+    navigator.mediaDevices.getUserMedia
+      .mockResolvedValueOnce(mockMediaStream)
+      .mockRejectedValueOnce(new Error('system audio unavailable'));
+
     const onError = vi.fn();
+
     const { result } = renderHook(() =>
-      useWhisper({ onTranscript: vi.fn(), onError })
+      useWhisper({
+        onTranscript: vi.fn(),
+        onError,
+      })
     );
 
     await act(async () => {
