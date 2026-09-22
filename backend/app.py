@@ -834,4 +834,5 @@ if __name__ == "__main__":
         host=host,
         port=port,
         debug=debug,
+        allow_unsafe_werkzeug=True,
     )
