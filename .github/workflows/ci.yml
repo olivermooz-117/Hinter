@@ -33,7 +33,7 @@ jobs:
         run: npm run build
 
   backend:
-    name: Backend Tests
+    name: Backend Tests & Smoke Test
     runs-on: ubuntu-latest
 
     steps:
@@ -54,4 +54,9 @@ jobs:
       - name: Run backend tests
         run: |
           cd backend
-          python -m pytest -v
+          python -m pytest tests -v
+
+      - name: Run backend smoke test
+        run: |
+          cd backend
+          python smoke_test.py
