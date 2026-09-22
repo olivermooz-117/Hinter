@@ -1,8 +1,10 @@
-import { useCallback, useRef, useState, useEffect } from 'react';
-const SYSTEM_AUDIO_LABEL = 'Hinter-System-Audio';
+import { useCallback, useEffect, useRef, useState } from "react";
+
+const SYSTEM_AUDIO_LABEL = "Hinter-System-Audio";
+const TARGET_SAMPLE_RATE = 16000;
 
 function getHinterAPI() {
-  if (typeof window !== 'undefined' && window.hinter) {
+  if (typeof window !== "undefined" && window.hinter) {
     return window.hinter;
   }
 
@@ -17,48 +19,117 @@ async function findSystemAudioDevice() {
   const devices = await navigator.mediaDevices.enumerateDevices();
 
   const audioInputs = devices.filter(
-    (device) => device.kind === 'audioinput'
+    (device) => device.kind === "audioinput"
   );
 
-  const systemDevice = audioInputs.find(
-    (device) =>
-      device.label === SYSTEM_AUDIO_LABEL ||
-      device.label.toLowerCase().includes('hinter-system-audio')
+  return (
+    audioInputs.find(
+      (device) =>
+        device.label === SYSTEM_AUDIO_LABEL ||
+        device.label.toLowerCase().includes("hinter-system-audio")
+    ) || null
   );
-
-  return systemDevice || null;
 }
 
+/**
+ * Resample Float32 audio to 16 kHz and convert it to signed 16-bit PCM.
+ */
 function floatToPcm16(input, sourceRate) {
-  const ratio = sourceRate / 16000;
-  const outputLength = Math.max(1, Math.floor(input.length / ratio));
+  if (!input || input.length === 0) {
+    return new ArrayBuffer(0);
+  }
+
+  if (!sourceRate || sourceRate <= 0) {
+    sourceRate = 48000;
+  }
+
+  if (sourceRate === TARGET_SAMPLE_RATE) {
+    const output = new ArrayBuffer(input.length * 2);
+    const view = new DataView(output);
+
+    for (let i = 0; i < input.length; i += 1) {
+      const sample = Math.max(-1, Math.min(1, input[i] || 0));
+
+      view.setInt16(
+        i * 2,
+        sample < 0 ? sample * 0x8000 : sample * 0x7fff,
+        true
+      );
+    }
+
+    return output;
+  }
+
+  const ratio = sourceRate / TARGET_SAMPLE_RATE;
+  const outputLength = Math.max(
+    1,
+    Math.floor(input.length / ratio)
+  );
+
   const output = new ArrayBuffer(outputLength * 2);
   const view = new DataView(output);
 
-  for (let index = 0; index < outputLength; index += 1) {
-    const sourceIndex = Math.min(input.length - 1, Math.floor(index * ratio));
-    const sample = Math.max(-1, Math.min(1, input[sourceIndex] || 0));
-    view.setInt16(index * 2, sample < 0 ? sample * 0x8000 : sample * 0x7fff, true);
+  for (let i = 0; i < outputLength; i += 1) {
+    const sourcePosition = i * ratio;
+
+    const leftIndex = Math.floor(sourcePosition);
+    const rightIndex = Math.min(
+      leftIndex + 1,
+      input.length - 1
+    );
+
+    const fraction = sourcePosition - leftIndex;
+
+    const leftSample = input[leftIndex] || 0;
+    const rightSample = input[rightIndex] || 0;
+
+    const interpolated =
+      leftSample +
+      (rightSample - leftSample) * fraction;
+
+    const sample = Math.max(
+      -1,
+      Math.min(1, interpolated)
+    );
+
+    view.setInt16(
+      i * 2,
+      sample < 0 ? sample * 0x8000 : sample * 0x7fff,
+      true
+    );
   }
 
   return output;
 }
 
-export function useWhisper({ onTranscript, onError, socket }) {
+export function useWhisper({
+  onTranscript,
+  onError,
+  socket,
+}) {
   const [listening, setListening] = useState(false);
   const [level, setLevel] = useState(0);
-  const [systemAudioState, setSystemAudioState] = useState('idle');
+  const [systemAudioState, setSystemAudioState] =
+    useState("idle");
 
   const streamRef = useRef(null);
   const systemStreamRef = useRef(null);
+
   const mixCtxRef = useRef(null);
   const ctxRef = useRef(null);
+
   const analyserRef = useRef(null);
   const rafRef = useRef(null);
+
   const recorderRef = useRef(null);
   const processorRef = useRef(null);
+
   const socketHandlersRef = useRef(null);
 
+  /**
+   * Check whether the Electron/PipeWire system-audio
+   * source is available.
+   */
   useEffect(() => {
     let cancelled = false;
 
@@ -68,33 +139,40 @@ export function useWhisper({ onTranscript, onError, socket }) {
 
         if (!api?.systemAudio?.listMonitors) {
           if (!cancelled) {
-            setSystemAudioState('unavailable');
+            setSystemAudioState("unavailable");
           }
+
           return;
         }
 
-        const monitors = await api.systemAudio.listMonitors();
+        const monitors =
+          await api.systemAudio.listMonitors();
 
-        if (cancelled) return;
+        if (cancelled) {
+          return;
+        }
 
         if (!monitors || monitors.length === 0) {
-          setSystemAudioState('unavailable');
+          setSystemAudioState("unavailable");
           return;
         }
 
-        const device = await findSystemAudioDevice();
+        const device =
+          await findSystemAudioDevice();
 
         if (!cancelled) {
-          setSystemAudioState(device ? 'ready' : 'unavailable');
+          setSystemAudioState(
+            device ? "ready" : "unavailable"
+          );
         }
       } catch (error) {
         console.warn(
-          '[system-audio] device detection failed:',
+          "[system-audio] device detection failed:",
           error
         );
 
         if (!cancelled) {
-          setSystemAudioState('unavailable');
+          setSystemAudioState("unavailable");
         }
       }
     }
@@ -106,34 +184,48 @@ export function useWhisper({ onTranscript, onError, socket }) {
     };
   }, []);
 
+  /**
+   * Stop the audio level meter.
+   */
   const stopLevelMeter = useCallback(() => {
     if (rafRef.current) {
       cancelAnimationFrame(rafRef.current);
+      rafRef.current = null;
     }
-
-    rafRef.current = null;
 
     if (ctxRef.current) {
       ctxRef.current.close().catch(() => {});
       ctxRef.current = null;
     }
 
-    if (mixCtxRef.current) {
-      mixCtxRef.current.close().catch(() => {});
-      mixCtxRef.current = null;
+    if (analyserRef.current) {
+      analyserRef.current = null;
     }
 
-    analyserRef.current = null;
     setLevel(0);
   }, []);
 
+  /**
+   * Start the audio level meter.
+   */
   const startLevelMeter = useCallback((stream) => {
     try {
+      if (
+        typeof AudioContext === "undefined" ||
+        !stream
+      ) {
+        return;
+      }
+
       const ctx = new AudioContext();
+
       ctxRef.current = ctx;
 
-      const source = ctx.createMediaStreamSource(stream);
-      const analyser = ctx.createAnalyser();
+      const source =
+        ctx.createMediaStreamSource(stream);
+
+      const analyser =
+        ctx.createAnalyser();
 
       analyser.fftSize = 256;
 
@@ -141,7 +233,10 @@ export function useWhisper({ onTranscript, onError, socket }) {
 
       analyserRef.current = analyser;
 
-      const data = new Uint8Array(analyser.frequencyBinCount);
+      const data =
+        new Uint8Array(
+          analyser.frequencyBinCount
+        );
 
       const tick = () => {
         if (!analyserRef.current) {
@@ -167,37 +262,84 @@ export function useWhisper({ onTranscript, onError, socket }) {
           )
         );
 
-        rafRef.current = requestAnimationFrame(tick);
+        rafRef.current =
+          requestAnimationFrame(tick);
       };
 
       tick();
     } catch (error) {
       console.warn(
-        '[audio] level meter unavailable:',
+        "[audio] level meter unavailable:",
         error
       );
     }
   }, []);
 
+  /**
+   * Stop everything.
+   */
   const stop = useCallback(() => {
-    if (socket && socketHandlersRef.current) {
-      socket.off('transcript', socketHandlersRef.current.transcript);
-      socket.off('transcription_interim', socketHandlersRef.current.interim);
-      socket.off('transcription_error', socketHandlersRef.current.error);
-      socket.emit('transcription:stop');
+    const handlers =
+      socketHandlersRef.current;
+
+    if (socket && handlers) {
+      try {
+        if (
+          typeof socket.off === "function"
+        ) {
+          socket.off(
+            "transcript",
+            handlers.transcript
+          );
+
+          socket.off(
+            "transcription_interim",
+            handlers.interim
+          );
+
+          socket.off(
+            "transcription_error",
+            handlers.error
+          );
+        }
+
+        if (
+          typeof socket.emit === "function"
+        ) {
+          socket.emit("transcription:stop");
+        }
+      } catch (error) {
+        console.warn(
+          "[socket] cleanup failed:",
+          error
+        );
+      }
+
       socketHandlersRef.current = null;
     }
 
+    /**
+     * Stop PCM processor.
+     */
     if (processorRef.current) {
-      processorRef.current.onaudioprocess = null;
-      processorRef.current.disconnect?.();
+      try {
+        processorRef.current.onaudioprocess =
+          null;
+
+        processorRef.current.disconnect?.();
+      } catch (_) {}
+
       processorRef.current = null;
     }
 
+    /**
+     * Stop MediaRecorder fallback.
+     */
     if (recorderRef.current) {
       try {
         if (
-          recorderRef.current.state === 'recording'
+          recorderRef.current.state ===
+          "recording"
         ) {
           recorderRef.current.stop();
         }
@@ -206,20 +348,45 @@ export function useWhisper({ onTranscript, onError, socket }) {
       recorderRef.current = null;
     }
 
+    /**
+     * Stop microphone tracks.
+     */
     if (streamRef.current) {
       streamRef.current
         .getTracks()
-        .forEach((track) => track.stop());
+        .forEach((track) => {
+          try {
+            track.stop();
+          } catch (_) {}
+        });
 
       streamRef.current = null;
     }
 
+    /**
+     * Stop system-audio tracks.
+     */
     if (systemStreamRef.current) {
       systemStreamRef.current
         .getTracks()
-        .forEach((track) => track.stop());
+        .forEach((track) => {
+          try {
+            track.stop();
+          } catch (_) {}
+        });
 
       systemStreamRef.current = null;
+    }
+
+    /**
+     * Close mixing AudioContext.
+     */
+    if (mixCtxRef.current) {
+      try {
+        mixCtxRef.current.close().catch(() => {});
+      } catch (_) {}
+
+      mixCtxRef.current = null;
     }
 
     stopLevelMeter();
@@ -227,24 +394,43 @@ export function useWhisper({ onTranscript, onError, socket }) {
     setListening(false);
 
     setSystemAudioState((current) =>
-      current === 'capturing'
-        ? 'ready'
+      current === "capturing"
+        ? "ready"
         : current
     );
-  }, [stopLevelMeter]);
+  }, [socket, stopLevelMeter]);
 
+  /**
+   * Start microphone + optional system audio.
+   */
   const start = useCallback(async () => {
+    /**
+     * Always clean up an existing session first.
+     */
     stop();
 
     let micStream;
 
-    /*
+    /**
      * ---------------------------------------------------------
      * 1. Capture physical microphone
      * ---------------------------------------------------------
+     *
+     * IMPORTANT:
+     * We do NOT require Socket.IO here.
+     *
+     * This allows the hook to work independently during
+     * testing and while the backend connection is starting.
      */
-
     try {
+      if (
+        !navigator.mediaDevices?.getUserMedia
+      ) {
+        throw new Error(
+          "Microphone capture is not supported in this environment."
+        );
+      }
+
       micStream =
         await navigator.mediaDevices.getUserMedia({
           audio: {
@@ -255,9 +441,14 @@ export function useWhisper({ onTranscript, onError, socket }) {
           video: false,
         });
     } catch (error) {
+      console.error(
+        "[microphone] capture failed:",
+        error
+      );
+
       onError?.(
-        error.message ||
-          'Microphone access denied'
+        error?.message ||
+          "Microphone access denied"
       );
 
       throw error;
@@ -265,12 +456,11 @@ export function useWhisper({ onTranscript, onError, socket }) {
 
     streamRef.current = micStream;
 
-    /*
+    /**
      * ---------------------------------------------------------
-     * 2. Find Hinter's PipeWire system-audio device
+     * 2. Find system audio device
      * ---------------------------------------------------------
      */
-
     let combinedStream = micStream;
 
     try {
@@ -279,32 +469,36 @@ export function useWhisper({ onTranscript, onError, socket }) {
 
       if (!systemDevice) {
         console.warn(
-          '[system-audio] Hinter-System-Audio device not found'
+          "[system-audio] Hinter-System-Audio device not found"
         );
 
-        setSystemAudioState('unavailable');
+        setSystemAudioState(
+          "unavailable"
+        );
 
         startLevelMeter(micStream);
       } else {
         console.info(
-          '[system-audio] Using device:',
+          "[system-audio] Using device:",
           systemDevice.label,
           systemDevice.deviceId
         );
 
-        setSystemAudioState('capturing');
+        setSystemAudioState(
+          "capturing"
+        );
 
-        /*
+        /**
          * -----------------------------------------------------
-         * 3. Capture the PipeWire virtual system-audio source
+         * 3. Capture system audio
          * -----------------------------------------------------
          */
-
         const systemStream =
           await navigator.mediaDevices.getUserMedia({
             audio: {
               deviceId: {
-                exact: systemDevice.deviceId,
+                exact:
+                  systemDevice.deviceId,
               },
               channelCount: 2,
               sampleRate: 48000,
@@ -316,26 +510,36 @@ export function useWhisper({ onTranscript, onError, socket }) {
           });
 
         if (
-          !systemStream.getAudioTracks().length
+          !systemStream.getAudioTracks()
+            .length
         ) {
           throw new Error(
-            'Hinter-System-Audio returned no audio track'
+            "Hinter-System-Audio returned no audio track"
           );
         }
 
         systemStreamRef.current =
           systemStream;
 
-        /*
+        /**
          * -----------------------------------------------------
          * 4. Mix microphone + system audio
          * -----------------------------------------------------
          */
+        if (
+          typeof AudioContext ===
+          "undefined"
+        ) {
+          throw new Error(
+            "AudioContext is unavailable."
+          );
+        }
 
         const audioCtx =
           new AudioContext();
 
-        mixCtxRef.current = audioCtx;
+        mixCtxRef.current =
+          audioCtx;
 
         const micSource =
           audioCtx.createMediaStreamSource(
@@ -361,64 +565,256 @@ export function useWhisper({ onTranscript, onError, socket }) {
         );
 
         console.info(
-          '[system-audio] Microphone + system audio mixed successfully'
+          "[system-audio] Microphone + system audio mixed successfully"
         );
       }
     } catch (error) {
       console.warn(
-        '[system-audio] Capture failed; falling back to microphone:',
+        "[system-audio] Capture failed; falling back to microphone:",
         error
       );
 
-      setSystemAudioState('error');
+      setSystemAudioState("error");
 
       if (systemStreamRef.current) {
         systemStreamRef.current
           .getTracks()
-          .forEach((track) => track.stop());
+          .forEach((track) => {
+            try {
+              track.stop();
+            } catch (_) {}
+          });
 
-        systemStreamRef.current = null;
+        systemStreamRef.current =
+          null;
       }
 
       startLevelMeter(micStream);
     }
 
-    if (socket) {
-      const handleTranscript = (payload) => onTranscript?.(payload?.text || '');
-      const handleInterim = () => {};
-      const handleError = (payload) => onError?.(payload?.message || 'Live transcription error');
+    /**
+     * ---------------------------------------------------------
+     * 5. Connect to Socket.IO if available
+     * ---------------------------------------------------------
+     *
+     * Socket.IO is optional here so the hook can still be
+     * tested and microphone capture can still work when the
+     * backend has not connected yet.
+     */
+    if (
+      socket &&
+      typeof socket.emit === "function"
+    ) {
+      /**
+       * Final transcript.
+       */
+      const handleTranscript = (payload) => {
+        const text =
+          typeof payload === "string"
+            ? payload
+            : payload?.text || "";
+
+        if (text) {
+          onTranscript?.(text);
+        }
+      };
+
+      /**
+       * Interim/live transcript.
+       *
+       * We pass this through to onTranscript as well so
+       * the UI can display the live text.
+       */
+      const handleInterim = (payload) => {
+        const text =
+          typeof payload === "string"
+            ? payload
+            : payload?.text || "";
+
+        if (text) {
+          onTranscript?.(text);
+        }
+      };
+
+      /**
+       * Backend transcription error.
+       */
+      const handleError = (payload) => {
+        const message =
+          typeof payload === "string"
+            ? payload
+            : payload?.message ||
+              "Live transcription error";
+
+        onError?.(message);
+      };
+
       socketHandlersRef.current = {
         transcript: handleTranscript,
         interim: handleInterim,
         error: handleError,
       };
-      socket.on('transcript', handleTranscript);
-      socket.on('transcription_interim', handleInterim);
-      socket.on('transcription_error', handleError);
-      socket.emit('transcription:start');
 
-      const pcmCtx = mixCtxRef.current || new AudioContext();
-      if (!mixCtxRef.current) {
-        mixCtxRef.current = pcmCtx;
+      if (
+        typeof socket.on === "function"
+      ) {
+        socket.on(
+          "transcript",
+          handleTranscript
+        );
+
+        socket.on(
+          "transcription_interim",
+          handleInterim
+        );
+
+        socket.on(
+          "transcription_error",
+          handleError
+        );
       }
-      const audioSource = pcmCtx.createMediaStreamSource(combinedStream);
-      const processor = pcmCtx.createScriptProcessor?.(4096, 1, 1);
-      if (!processor) {
-        stop();
-        throw new Error('PCM audio processing is unavailable in this Electron environment');
+
+      /**
+       * Tell Flask/Gemini to start a new
+       * transcription session.
+       */
+      socket.emit(
+        "transcription:start"
+      );
+
+      /**
+       * -----------------------------------------------------
+       * 6. Convert microphone/system audio to PCM
+       * -----------------------------------------------------
+       */
+      let pcmCtx = mixCtxRef.current;
+
+      if (!pcmCtx) {
+        if (
+          typeof AudioContext ===
+          "undefined"
+        ) {
+          throw new Error(
+            "AudioContext is unavailable."
+          );
+        }
+
+        pcmCtx = new AudioContext();
+
+        mixCtxRef.current =
+          pcmCtx;
       }
-      processor.onaudioprocess = (event) => {
-        const input = event.inputBuffer.getChannelData(0);
-        const pcm = floatToPcm16(input, pcmCtx.sampleRate || 48000);
-        socket.emit('transcription:audio', pcm);
+
+      const audioSource =
+        pcmCtx.createMediaStreamSource(
+          combinedStream
+        );
+
+      if (
+        typeof pcmCtx.createScriptProcessor !==
+        "function"
+      ) {
+        throw new Error(
+          "PCM audio processing is unavailable in this Electron environment."
+        );
+      }
+
+      const processor =
+        pcmCtx.createScriptProcessor(
+          4096,
+          1,
+          1
+        );
+
+      processor.onaudioprocess = (
+        event
+      ) => {
+        if (
+          !socket ||
+          typeof socket.emit !==
+            "function"
+        ) {
+          return;
+        }
+
+        try {
+          const input =
+            event.inputBuffer.getChannelData(
+              0
+            );
+
+          const pcm =
+            floatToPcm16(
+              input,
+              pcmCtx.sampleRate ||
+                48000
+            );
+
+          if (pcm.byteLength > 0) {
+            socket.emit(
+              "transcription:audio",
+              pcm
+            );
+          }
+        } catch (error) {
+          console.warn(
+            "[audio] PCM processing failed:",
+            error
+          );
+        }
       };
+
       audioSource.connect(processor);
-      processor.connect(pcmCtx.destination);
-      processorRef.current = processor;
-    } else if (typeof MediaRecorder !== 'undefined') {
-      // Keep isolated hook consumers from failing before Socket.IO is ready.
-      recorderRef.current = new MediaRecorder(combinedStream);
-      recorderRef.current.start();
+
+      /**
+       * Keep the ScriptProcessor alive.
+       */
+      processor.connect(
+        pcmCtx.destination
+      );
+
+      processorRef.current =
+        processor;
+
+      console.info(
+        "[whisper] PCM streaming started"
+      );
+    } else {
+      /**
+       * No Socket.IO connection.
+       *
+       * We intentionally do not throw here.
+       * This keeps the hook usable in isolation/tests.
+       */
+      console.warn(
+        "[whisper] Socket.IO connection is not available; audio capture started without backend streaming."
+      );
+
+      /**
+       * Provide a MediaRecorder fallback if
+       * the browser/Electron environment supports it.
+       */
+      if (
+        typeof MediaRecorder !==
+        "undefined"
+      ) {
+        try {
+          recorderRef.current =
+            new MediaRecorder(
+              combinedStream
+            );
+
+          recorderRef.current.start();
+        } catch (error) {
+          console.warn(
+            "[whisper] MediaRecorder fallback unavailable:",
+            error
+          );
+
+          recorderRef.current =
+            null;
+        }
+      }
     }
 
     setListening(true);

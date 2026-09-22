@@ -1,97 +1,176 @@
 import { useEffect, useRef, useState } from 'react';
 import { io } from 'socket.io-client';
-import { BACKEND_URL } from '../config';
+
+const BACKEND = 'http://127.0.0.1:5000';
 
 export function useBackend({ onSuggestion }) {
   const [status, setStatus] = useState({
     label: 'connecting…',
     kind: 'info',
   });
+
   const [backendOk, setBackendOk] = useState(false);
   const [connectionState, setConnectionState] = useState('connecting');
-  const [socket, setSocket] = useState(null);
+
   const socketRef = useRef(null);
-  const onSuggestionRef = useRef(onSuggestion);
-  onSuggestionRef.current = onSuggestion;
 
   useEffect(() => {
     let cancelled = false;
 
-    fetch(`${BACKEND_URL}/api/health`)
-      .then((r) => r.json())
+    fetch(`${BACKEND}/api/health`)
+      .then((response) => response.json())
       .then((data) => {
         if (cancelled) return;
+
         setBackendOk(!!data.ok);
+
         if (!data.ok) {
-          setStatus({ label: 'backend error', kind: 'error' });
+          setStatus({
+            label: 'backend error',
+            kind: 'error',
+          });
         } else if (!data.gemini_key) {
-          setStatus({ label: 'ready (no Gemini API key)', kind: 'warn' });
+          setStatus({
+            label: 'ready (no Gemini key)',
+            kind: 'warn',
+          });
         } else {
-          setStatus({ label: 'ready', kind: 'ready' });
+          setStatus({
+            label: 'ready',
+            kind: 'ready',
+          });
         }
       })
       .catch(() => {
         if (cancelled) return;
+
         setBackendOk(false);
-        setStatus({ label: 'backend offline', kind: 'error' });
+
+        setStatus({
+          label: 'backend offline',
+          kind: 'error',
+        });
       });
 
-    const socket = io(BACKEND_URL, {
-      transports: ['websocket', 'polling'],
+    const socket = io(BACKEND, {
+      transports: ['polling', 'websocket'],
+      upgrade: true,
       reconnection: true,
       reconnectionAttempts: 10,
       reconnectionDelay: 1000,
       reconnectionDelayMax: 5000,
     });
+
     socketRef.current = socket;
-    setSocket(socket);
 
     socket.on('connect', () => {
+      if (cancelled) return;
+
+      console.log('[socket] connected:', socket.id);
+
       setConnectionState('connected');
+
       socket.emit('start_session');
     });
-    socket.on('disconnect', () => {
+
+    socket.on('disconnect', (reason) => {
+      if (cancelled) return;
+
+      console.log('[socket] disconnected:', reason);
+
       setConnectionState('disconnected');
-      setStatus({ label: 'backend offline', kind: 'error' });
+
+      setStatus({
+        label: 'backend offline',
+        kind: 'error',
+      });
+
       setBackendOk(false);
     });
-    socket.on('connect_error', () => {
+
+    socket.on('connect_error', (error) => {
+      if (cancelled) return;
+
+      console.error('[socket] connection error:', error);
+
       setConnectionState('disconnected');
     });
+
     socket.on('suggestion', (payload) => {
-      if (payload?.text) onSuggestionRef.current?.(payload.text);
+      if (payload?.text) {
+        onSuggestion?.(payload.text);
+      }
     });
+
     socket.on('error', (payload) => {
       if (payload?.error === 'quota') {
-        onSuggestionRef.current?.(payload.message);
+        onSuggestion?.(payload.message);
         return;
       }
-      console.error('backend error', payload);
-      setStatus({ label: payload?.message || 'Suggestion error', kind: 'error' });
+
+      console.error('[backend] error:', payload);
+
+      setStatus({
+        label: payload?.message || 'Suggestion error',
+        kind: 'error',
+      });
     });
 
     return () => {
       cancelled = true;
-      socket.disconnect();
+
+      /*
+       * Socket.IO has removeAllListeners(), but our Vitest
+       * mock socket may not. The optional call keeps cleanup
+       * compatible with both.
+       */
+      socket.removeAllListeners?.();
+
+      socket.disconnect?.();
+
+      if (socketRef.current === socket) {
+        socketRef.current = null;
+      }
     };
-  }, []);
+  }, [onSuggestion]);
 
   const pushTranscript = async (text) => {
     if (!text?.trim()) return;
+
     try {
-      await fetch(`${BACKEND_URL}/api/transcript`, {
+      await fetch(`${BACKEND}/api/transcript`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ text }),
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          text,
+        }),
       });
-    } catch (e) {
-      console.warn('push transcript failed', e);
+    } catch (error) {
+      console.warn('[backend] push transcript failed:', error);
     }
+  };
+
+  const startSession = () => {
+    socketRef.current?.emit('start_session');
   };
 
   const endSession = () => {
     socketRef.current?.emit('end_session');
   };
 
-  return { status, setStatus, backendOk, pushTranscript, endSession, connectionState, socket };
+  return {
+    status,
+    setStatus,
+    backendOk,
+    pushTranscript,
+    startSession,
+    endSession,
+    connectionState,
+
+    // IMPORTANT:
+    // useWhisper needs this Socket.IO connection
+    socket: socketRef.current,
+  };
 }

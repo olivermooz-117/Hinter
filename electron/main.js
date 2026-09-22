@@ -1,10 +1,13 @@
 const { app, BrowserWindow, screen, ipcMain, session } = require('electron');
 const path = require('path');
 const fs = require('fs');
-const { execSync } = require('child_process');
+const { execFileSync } = require('child_process');
 
 let overlayWindow = null;
 let SYSTEM_AUDIO_AVAILABLE = false;
+
+const SYSTEM_AUDIO_SOURCE = 'hinter_system_audio';
+const SYSTEM_AUDIO_DESCRIPTION = 'Hinter-System-Audio';
 
 function loadEnv() {
   const envPath = path.join(__dirname, '..', '.env');
@@ -43,38 +46,129 @@ const isDev =
   (process.env.HINTER_DEV === '1' ||
     process.env.NODE_ENV === 'development');
 
-function listLinuxMonitorSources() {
+function runPactl(args) {
+  return execFileSync('pactl', args, {
+    encoding: 'utf8',
+    timeout: 3000,
+  }).trim();
+}
+
+function listLinuxSources() {
   if (process.platform !== 'linux') {
     return [];
   }
 
-  const monitors = [];
-
   try {
-    const pactlOut = execSync('pactl list short sources', {
-      encoding: 'utf8',
-      timeout: 2000,
-    });
+    const output = runPactl(['list', 'short', 'sources']);
 
-    for (const line of pactlOut.trim().split('\n')) {
-      const parts = line.split('\t');
+    return output
+      .split('\n')
+      .map((line) => line.trim())
+      .filter(Boolean)
+      .map((line) => {
+        const parts = line.split(/\s+/);
 
-      if (
-        parts.length >= 2 &&
-        parts[1] &&
-        parts[1].endsWith('.monitor')
-      ) {
-        monitors.push(parts[1]);
-      }
-    }
+        return {
+          id: parts[0],
+          name: parts[1],
+          driver: parts[2],
+          format: parts[3],
+          channels: parts[4],
+          sampleRate: parts[5],
+          state: parts.slice(6).join(' '),
+        };
+      });
   } catch (error) {
     console.warn(
-      '[system-audio] pactl monitor detection failed:',
+      '[system-audio] Could not list PulseAudio/PipeWire sources:',
       error.message
     );
+
+    return [];
+  }
+}
+
+function listLinuxMonitorSources() {
+  return listLinuxSources()
+    .filter((source) => source.name?.endsWith('.monitor'))
+    .map((source) => source.name);
+}
+
+/**
+ * Ensures that Hinter-System-Audio exists.
+ *
+ * The source is a remapped copy of the default speaker monitor.
+ * This allows Chromium/Electron to capture computer audio as an
+ * ordinary input device while leaving the user's physical microphone
+ * untouched.
+ */
+function ensureLinuxSystemAudioSource() {
+  if (process.platform !== 'linux') {
+    return false;
   }
 
-  return monitors;
+  const sources = listLinuxSources();
+
+  const existing = sources.find(
+    (source) => source.name === SYSTEM_AUDIO_SOURCE
+  );
+
+  if (existing) {
+    console.info(
+      '[system-audio] Existing Hinter-System-Audio source found:',
+      existing.name
+    );
+
+    return true;
+  }
+
+  const monitor = sources.find(
+    (source) => source.name?.endsWith('.monitor')
+  );
+
+  if (!monitor) {
+    console.warn(
+      '[system-audio] No Linux monitor source is available yet.'
+    );
+
+    return false;
+  }
+
+  try {
+    console.info(
+      '[system-audio] Creating Hinter-System-Audio from:',
+      monitor.name
+    );
+
+    const moduleId = runPactl([
+      'load-module',
+      'module-remap-source',
+      `master=${monitor.name}`,
+      `source_name=${SYSTEM_AUDIO_SOURCE}`,
+      `source_properties=device.description=${SYSTEM_AUDIO_DESCRIPTION}`,
+      'channels=2',
+      'channel_map=front-left,front-right',
+      'master_channel_map=front-left,front-right',
+      'remix=no',
+    ]);
+
+    console.info(
+      '[system-audio] Hinter-System-Audio created successfully.',
+      {
+        moduleId,
+        sourceName: SYSTEM_AUDIO_SOURCE,
+      }
+    );
+
+    return true;
+  } catch (error) {
+    console.error(
+      '[system-audio] Failed to create Hinter-System-Audio:',
+      error.message
+    );
+
+    return false;
+  }
 }
 
 function detectMonitorSources() {
@@ -108,6 +202,7 @@ function createOverlayWindow() {
   });
 
   overlayWindow.setAlwaysOnTop(true, 'screen-saver');
+
   overlayWindow.setVisibleOnAllWorkspaces(true, {
     visibleOnFullScreen: true,
   });
@@ -131,19 +226,19 @@ function configureDisplayMediaHandler() {
    *
    * We do NOT use getDisplayMedia() for system audio here.
    *
-   * Electron's "audio: 'loopback'" display-media option is currently
-   * supported only on Windows. Passing video: null also causes Electron
-   * to throw because video must be a DesktopCapturerSource or WebFrameMain.
+   * Electron's "audio: 'loopback'" display-media option is
+   * platform-dependent and is not used by Hinter's Linux path.
    *
-   * Linux system audio is handled separately through the PipeWire/PulseAudio
-   * monitor source exposed to the renderer.
+   * Linux system audio is handled through the PipeWire/PulseAudio
+   * Hinter-System-Audio source exposed to the renderer.
    */
 
   if (process.platform === 'linux') {
     session.defaultSession.setDisplayMediaRequestHandler(
       (_request, callback) => {
         console.info(
-          '[system-audio] Linux display capture requested; display-media system audio is disabled'
+          '[system-audio] Linux display capture requested; ' +
+            'display-media system audio is disabled'
         );
 
         callback(null);
@@ -152,21 +247,39 @@ function configureDisplayMediaHandler() {
 
     return;
   }
-
-  /*
-   * For non-Linux platforms, leave display capture to Electron's normal
-   * handling. The Linux monitor implementation above is the platform-specific
-   * path used by this build.
-   */
 }
 
 app.whenReady().then(() => {
-  SYSTEM_AUDIO_AVAILABLE = detectMonitorSources();
+  /*
+   * Make sure the virtual system-audio source exists BEFORE
+   * the renderer starts enumerating audio devices.
+   */
+  if (process.platform === 'linux') {
+    SYSTEM_AUDIO_AVAILABLE = ensureLinuxSystemAudioSource();
+
+    /*
+     * The source may take a moment to appear in PipeWire after
+     * module-remap-source returns, so verify it once more.
+     */
+    if (!SYSTEM_AUDIO_AVAILABLE) {
+      setTimeout(() => {
+        SYSTEM_AUDIO_AVAILABLE = ensureLinuxSystemAudioSource();
+
+        console.info('[system-audio] delayed availability check:', {
+          available: SYSTEM_AUDIO_AVAILABLE,
+          source: SYSTEM_AUDIO_SOURCE,
+        });
+      }, 500);
+    }
+  }
+
+  const monitors = listLinuxMonitorSources();
 
   console.info('[system-audio] monitor detection:', {
     platform: process.platform,
     available: SYSTEM_AUDIO_AVAILABLE,
-    monitors: listLinuxMonitorSources(),
+    monitors,
+    hinterSource: SYSTEM_AUDIO_SOURCE,
   });
 
   configureDisplayMediaHandler();
@@ -200,13 +313,25 @@ app.on('window-all-closed', () => {
 
 ipcMain.handle('hinter:ping', () => 'pong from main process');
 
-ipcMain.handle('system-audio:list-monitors', async () => {
-  const monitors = listLinuxMonitorSources();
+ipcMain.handle(
+  'system-audio:list-monitors',
+  async () => {
+    /*
+     * Re-check the virtual source whenever the renderer asks for
+     * available system audio. This also repairs the source if
+     * PipeWire removed it while Hinter was running.
+     */
+    if (process.platform === 'linux') {
+      SYSTEM_AUDIO_AVAILABLE = ensureLinuxSystemAudioSource();
+    }
 
-  console.info('[system-audio] monitor sources:', monitors);
+    const monitors = listLinuxMonitorSources();
 
-  return monitors;
-});
+    console.info('[system-audio] monitor sources:', monitors);
+
+    return monitors;
+  }
+);
 
 ipcMain.handle(
   'system-audio:start-capture',
@@ -216,6 +341,11 @@ ipcMain.handle(
         'System audio capture only implemented for Linux in this build'
       );
     }
+
+    /*
+     * Make sure the virtual source exists before capture begins.
+     */
+    SYSTEM_AUDIO_AVAILABLE = ensureLinuxSystemAudioSource();
 
     const monitors = listLinuxMonitorSources();
 
@@ -234,7 +364,8 @@ ipcMain.handle(
 
     return {
       sourceName,
+      systemAudioSource: SYSTEM_AUDIO_SOURCE,
+      systemAudioAvailable: SYSTEM_AUDIO_AVAILABLE,
     };
   }
 );
-
