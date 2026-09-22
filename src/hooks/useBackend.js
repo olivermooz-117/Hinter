@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState } from 'react';
 import { io } from 'socket.io-client';
+import { BACKEND_URL } from '../config';
 
-const BACKEND = 'http://127.0.0.1:5000';
+const BACKEND = BACKEND_URL;
 
 export function useBackend({ onSuggestion }) {
   const [status, setStatus] = useState({
@@ -119,13 +120,7 @@ export function useBackend({ onSuggestion }) {
     return () => {
       cancelled = true;
 
-      /*
-       * Socket.IO has removeAllListeners(), but our Vitest
-       * mock socket may not. The optional call keeps cleanup
-       * compatible with both.
-       */
       socket.removeAllListeners?.();
-
       socket.disconnect?.();
 
       if (socketRef.current === socket) {
@@ -168,9 +163,6 @@ export function useBackend({ onSuggestion }) {
     startSession,
     endSession,
     connectionState,
-
-    // IMPORTANT:
-    // useWhisper needs this Socket.IO connection
     socket: socketRef.current,
   };
 }
