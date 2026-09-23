@@ -8,6 +8,8 @@ from typing import List
 from services.gemini_client import get_gemini_client
 
 
+DEFAULT_SUGGESTION_MODEL = "gemini-3.6-flash"
+
 SYSTEM_PROMPT = """You are Hinter, a transparent AI meeting co-pilot.
 
 You receive a rolling transcript of a live meeting. Your job is to suggest
@@ -45,8 +47,11 @@ def generate_suggestions(transcript_window: List[str]) -> str:
 
     model = os.environ.get(
         "GEMINI_SUGGESTION_MODEL",
-        "gemini-2.5-flash",
-    )
+        DEFAULT_SUGGESTION_MODEL,
+    ).strip()
+
+    if not model:
+        model = DEFAULT_SUGGESTION_MODEL
 
     prompt = f"""{SYSTEM_PROMPT}
 
@@ -72,7 +77,6 @@ Suggestions:"""
 
             if content is not None:
                 parts = getattr(content, "parts", None) or []
-
                 values = []
 
                 for part in parts:

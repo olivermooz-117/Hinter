@@ -4,6 +4,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
 os.environ.setdefault("GEMINI_API_KEY", "test-gemini-key")
@@ -30,6 +31,7 @@ def test_generate_suggestions_calls_gemini(mock_factory):
     from services.suggestions import generate_suggestions
 
     mock_client = MagicMock()
+
     mock_client.models.generate_content.return_value = MagicMock(
         text="Ask for clarification.\nConfirm next steps."
     )
@@ -46,16 +48,17 @@ def test_generate_suggestions_calls_gemini(mock_factory):
 
     call_args = mock_client.models.generate_content.call_args.kwargs
 
-    assert call_args["model"] == "gemini-3.5-flash"
+    assert call_args["model"] == "gemini-3.6-flash"
 
 
 @patch("services.suggestions.get_gemini_client")
 def test_generate_suggestions_uses_custom_model(mock_factory):
     from services.suggestions import generate_suggestions
 
-    os.environ["GEMINI_SUGGESTION_MODEL"] = "gemini-2.5-flash-lite"
+    os.environ["GEMINI_SUGGESTION_MODEL"] = "gemini-3.5-flash"
 
     mock_client = MagicMock()
+
     mock_client.models.generate_content.return_value = MagicMock(
         text="Test suggestion"
     )
@@ -66,8 +69,31 @@ def test_generate_suggestions_uses_custom_model(mock_factory):
 
     call_args = mock_client.models.generate_content.call_args.kwargs
 
-    assert call_args["model"] == "gemini-2.5-flash-lite"
+    assert call_args["model"] == "gemini-3.5-flash"
     assert result == "Test suggestion"
+
+    del os.environ["GEMINI_SUGGESTION_MODEL"]
+
+
+@patch("services.suggestions.get_gemini_client")
+def test_generate_suggestions_empty_model_uses_default(mock_factory):
+    from services.suggestions import generate_suggestions
+
+    os.environ["GEMINI_SUGGESTION_MODEL"] = ""
+
+    mock_client = MagicMock()
+
+    mock_client.models.generate_content.return_value = MagicMock(
+        text="Test suggestion"
+    )
+
+    mock_factory.return_value = mock_client
+
+    generate_suggestions(["Test transcript"])
+
+    call_args = mock_client.models.generate_content.call_args.kwargs
+
+    assert call_args["model"] == "gemini-3.6-flash"
 
     del os.environ["GEMINI_SUGGESTION_MODEL"]
 
@@ -77,6 +103,7 @@ def test_generate_suggestions_passes_system_prompt(mock_factory):
     from services.suggestions import generate_suggestions, SYSTEM_PROMPT
 
     mock_client = MagicMock()
+
     mock_client.models.generate_content.return_value = MagicMock(
         text="Test"
     )
