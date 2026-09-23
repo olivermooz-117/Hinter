@@ -30,9 +30,7 @@ from services.live_transcription import (
     LiveTranscriptionSession,
 )
 from services.stt import transcribe_audio
-from services.suggestions import (
-    generate_suggestions,
-)
+from services.suggestions import generate_suggestions
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -40,19 +38,30 @@ ROOT = Path(__file__).resolve().parent.parent
 load_dotenv(ROOT / ".env")
 
 
-DEFAULT_FRONTEND_URLS = (
-    "http://127.0.0.1:5173,"
-    "http://localhost:5173"
-)
+DEFAULT_FRONTEND_URLS = [
+    "http://127.0.0.1:5173",
+    "http://localhost:5173",
+]
 
-frontend_origins = [
+
+configured_frontend_urls = [
     origin.strip()
     for origin in os.environ.get(
         "FRONTEND_URL",
-        DEFAULT_FRONTEND_URLS,
+        "",
     ).split(",")
     if origin.strip()
 ]
+
+
+# Keep local development origins available and add
+# any configured production frontend origins.
+frontend_origins = list(
+    dict.fromkeys(
+        DEFAULT_FRONTEND_URLS
+        + configured_frontend_urls
+    )
+)
 
 
 app = Flask(__name__)
@@ -67,7 +76,7 @@ CORS(
     app,
     resources={
         r"/api/*": {
-            "origins": frontend_origins
+            "origins": frontend_origins,
         }
     },
 )
@@ -80,9 +89,25 @@ socketio = SocketIO(
 )
 
 
-SessionLocal = init_db(
-    str(ROOT / "data" / "hinter.db")
-)
+# Vercel's deployment filesystem is read-only.
+#
+# Local:
+#   backend/data/hinter.db
+#
+# Vercel:
+#   /tmp/hinter.db
+#
+# /tmp is writable but temporary. Production session
+# history should eventually move to PostgreSQL.
+if os.environ.get("VERCEL"):
+    DATABASE_PATH = "/tmp/hinter.db"
+else:
+    DATABASE_PATH = str(
+        ROOT / "data" / "hinter.db"
+    )
+
+
+SessionLocal = init_db(DATABASE_PATH)
 
 
 _state = {
@@ -170,16 +195,8 @@ def _is_quota_error(error: Exception) -> bool:
     """Identify provider quota errors safely."""
 
     status = (
-        getattr(
-            error,
-            "status_code",
-            None,
-        )
-        or getattr(
-            error,
-            "status",
-            None,
-        )
+        getattr(error, "status_code", None)
+        or getattr(error, "status", None)
     )
 
     details = " ".join(
@@ -214,18 +231,13 @@ def _maybe_suggest() -> None:
             return
 
         _state["last_suggestion_at"] = now
-
-        lines = list(
-            _state["transcript"]
-        )
+        lines = list(_state["transcript"])
 
     if not lines:
         return
 
     try:
-        text = generate_suggestions(
-            lines
-        )
+        text = generate_suggestions(lines)
 
         if text and text != "(listening)":
             _save_suggestion(text)
@@ -253,9 +265,7 @@ def _maybe_suggest() -> None:
             socketio.emit(
                 "error",
                 {
-                    "message": (
-                        f"Suggestion error: {error}"
-                    )
+                    "message": f"Suggestion error: {error}",
                 },
             )
 
@@ -289,13 +299,8 @@ def _handle_live_transcription(
         cleaned,
     )
 
-    _state["transcript"].append(
-        cleaned
-    )
-
-    _state["transcript"] = (
-        _state["transcript"][-200:]
-    )
+    _state["transcript"].append(cleaned)
+    _state["transcript"] = _state["transcript"][-200:]
 
     _save_transcript(cleaned)
 
@@ -305,8 +310,6 @@ def _handle_live_transcription(
         to=sid,
     )
 
-    # Keep the legacy event for any existing
-    # component that still listens for "transcript".
     socketio.emit(
         "transcript",
         {"text": cleaned},
@@ -347,18 +350,14 @@ def health():
         {
             "ok": True,
             "gemini_key": gemini_key,
-            "session_id": _state[
-                "session_id"
-            ],
+            "session_id": _state["session_id"],
         }
     )
 
 
 @app.post("/api/transcribe")
 def api_transcribe():
-    """
-    Legacy batch transcription endpoint.
-    """
+    """Legacy batch transcription endpoint."""
 
     if (
         "file" not in request.files
@@ -368,12 +367,9 @@ def api_transcribe():
         filename = "chunk.webm"
 
         if not audio or len(audio) < 500:
-            return (
-                jsonify(
-                    {"error": "no audio"}
-                ),
-                400,
-            )
+            return jsonify(
+                {"error": "no audio"}
+            ), 400
 
     else:
         uploaded = (
@@ -388,16 +384,9 @@ def api_transcribe():
         )
 
         if len(audio) < 500:
-            return (
-                jsonify(
-                    {
-                        "error": (
-                            "audio too small"
-                        )
-                    }
-                ),
-                400,
-            )
+            return jsonify(
+                {"error": "audio too small"}
+            ), 400
 
     try:
         text = transcribe_audio(
@@ -406,21 +395,13 @@ def api_transcribe():
         )
 
     except Exception as error:
-        return (
-            jsonify(
-                {"error": str(error)}
-            ),
-            500,
-        )
+        return jsonify(
+            {"error": str(error)}
+        ), 500
 
     if text:
-        _state["transcript"].append(
-            text
-        )
-
-        _state["transcript"] = (
-            _state["transcript"][-200:]
-        )
+        _state["transcript"].append(text)
+        _state["transcript"] = _state["transcript"][-200:]
 
         _save_transcript(text)
 
@@ -440,31 +421,20 @@ def api_transcribe():
 
 @app.post("/api/transcript")
 def api_transcript_text():
-    data = (
-        request.get_json(
-            force=True,
-            silent=True,
-        )
-        or {}
-    )
+    data = request.get_json(
+        force=True,
+        silent=True,
+    ) or {}
 
-    text = (
-        data.get("text") or ""
-    ).strip()
+    text = (data.get("text") or "").strip()
 
     if not text:
-        return (
-            jsonify({"error": "empty"}),
-            400,
-        )
+        return jsonify(
+            {"error": "empty"}
+        ), 400
 
-    _state["transcript"].append(
-        text
-    )
-
-    _state["transcript"] = (
-        _state["transcript"][-200:]
-    )
+    _state["transcript"].append(text)
+    _state["transcript"] = _state["transcript"][-200:]
 
     _save_transcript(text)
 
@@ -489,9 +459,7 @@ def list_sessions():
     try:
         rows = (
             db.query(Session)
-            .order_by(
-                Session.started_at.desc()
-            )
+            .order_by(Session.started_at.desc())
             .limit(50)
             .all()
         )
@@ -525,20 +493,15 @@ def get_session(session_id: int):
     db = SessionLocal()
 
     try:
-        session = (
-            db.get(
-                Session,
-                session_id,
-            )
+        session = db.get(
+            Session,
+            session_id,
         )
 
         if not session:
-            return (
-                jsonify(
-                    {"error": "not found"}
-                ),
-                404,
-            )
+            return jsonify(
+                {"error": "not found"}
+            ), 404
 
         return jsonify(
             {
@@ -581,9 +544,7 @@ def on_connect():
         "status",
         {
             "message": "connected",
-            "session_id": _state[
-                "session_id"
-            ],
+            "session_id": _state["session_id"],
         },
     )
 
@@ -621,8 +582,8 @@ def on_end_session():
         )
 
         if session:
-            session.ended_at = (
-                datetime.now(timezone.utc)
+            session.ended_at = datetime.now(
+                timezone.utc
             )
 
             db.commit()
@@ -643,35 +604,27 @@ def on_end_session():
 def on_transcription_start():
     sid = request.sid
 
-    existing = (
-        _state["live_sessions"].pop(
-            sid,
-            None,
-        )
+    existing = _state["live_sessions"].pop(
+        sid,
+        None,
     )
 
     if existing:
         existing.stop()
 
     session = LiveTranscriptionSession(
-        lambda text, final: (
-            _handle_live_transcription(
-                sid,
-                text,
-                final,
-            )
+        lambda text, final: _handle_live_transcription(
+            sid,
+            text,
+            final,
         ),
-        lambda message: (
-            _handle_live_error(
-                sid,
-                message,
-            )
+        lambda message: _handle_live_error(
+            sid,
+            message,
         ),
     )
 
-    _state["live_sessions"][sid] = (
-        session
-    )
+    _state["live_sessions"][sid] = session
 
     session.start()
 
@@ -689,10 +642,8 @@ def on_transcription_start():
 def on_transcription_audio(audio):
     sid = request.sid
 
-    session = (
-        _state["live_sessions"].get(
-            sid
-        )
+    session = _state["live_sessions"].get(
+        sid
     )
 
     if not session:
@@ -700,8 +651,7 @@ def on_transcription_audio(audio):
             "transcription_error",
             {
                 "message": (
-                    "Live transcription "
-                    "is not active."
+                    "Live transcription is not active."
                 )
             },
         )
@@ -741,8 +691,8 @@ def on_transcription_audio(audio):
 
     if not accepted:
         print(
-            "[socket] Gemini session "
-            "did not accept PCM chunk"
+            "[socket] Gemini session did not "
+            "accept PCM chunk"
         )
 
 
@@ -750,11 +700,9 @@ def on_transcription_audio(audio):
 def on_transcription_stop():
     sid = request.sid
 
-    session = (
-        _state["live_sessions"].pop(
-            sid,
-            None,
-        )
+    session = _state["live_sessions"].pop(
+        sid,
+        None,
     )
 
     if session:
@@ -774,11 +722,9 @@ def on_transcription_stop():
 def on_disconnect():
     sid = request.sid
 
-    session = (
-        _state["live_sessions"].pop(
-            sid,
-            None,
-        )
+    session = _state["live_sessions"].pop(
+        sid,
+        None,
     )
 
     if session:
@@ -797,9 +743,7 @@ if __name__ == "__main__":
     )
 
     port = int(
-        os.environ.get(
-            "PORT"
-        )
+        os.environ.get("PORT")
         or os.environ.get(
             "HINTER_PORT",
             "5000",
