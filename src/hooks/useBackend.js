@@ -1,8 +1,39 @@
 import { useEffect, useRef, useState } from 'react';
 import { io } from 'socket.io-client';
-import { BACKEND_URL } from '../config';
 
-const BACKEND = BACKEND_URL;
+function getBackendUrl() {
+  const configured = import.meta.env.VITE_BACKEND_URL?.trim();
+
+  if (configured) {
+    return configured;
+  }
+
+  if (typeof window === 'undefined') {
+    return 'http://127.0.0.1:5000';
+  }
+
+  const { protocol, hostname, origin } = window.location;
+
+  // Local browser development.
+  if (
+    (protocol === 'http:' || protocol === 'https:') &&
+    (hostname === 'localhost' ||
+      hostname === '127.0.0.1' ||
+      hostname === '0.0.0.0')
+  ) {
+    return 'http://127.0.0.1:5000';
+  }
+
+  // Vercel / production browser.
+  if (protocol === 'http:' || protocol === 'https:') {
+    return origin;
+  }
+
+  // Packaged Electron app.
+  return 'http://127.0.0.1:5000';
+}
+
+const BACKEND = getBackendUrl();
 
 export function useBackend({ onSuggestion }) {
   const [status, setStatus] = useState({
@@ -119,7 +150,6 @@ export function useBackend({ onSuggestion }) {
 
     return () => {
       cancelled = true;
-
       socket.removeAllListeners?.();
       socket.disconnect?.();
 
@@ -138,12 +168,13 @@ export function useBackend({ onSuggestion }) {
         headers: {
           'Content-Type': 'application/json',
         },
-        body: JSON.stringify({
-          text,
-        }),
+        body: JSON.stringify({ text }),
       });
     } catch (error) {
-      console.warn('[backend] push transcript failed:', error);
+      console.warn(
+        '[backend] push transcript failed:',
+        error
+      );
     }
   };
 
