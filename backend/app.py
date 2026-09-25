@@ -612,6 +612,12 @@ def on_transcription_start():
     if existing:
         existing.stop()
 
+    # Fresh rolling transcript for this listening session (shared process state).
+    # Prevents stale lines from a previous Listen cycle feeding suggestions.
+    _state["transcript"] = []
+    _state["last_suggestion_at"] = 0.0
+    _ensure_session()
+
     session = LiveTranscriptionSession(
         lambda text, final: _handle_live_transcription(
             sid,

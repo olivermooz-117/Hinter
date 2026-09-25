@@ -1,135 +1,101 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from 'react';
 
-const SYSTEM_AUDIO_LABEL = "Hinter-System-Audio";
+const SYSTEM_AUDIO_LABEL = 'Hinter-System-Audio';
 const TARGET_SAMPLE_RATE = 16000;
 
 function getHinterAPI() {
-  if (typeof window !== "undefined" && window.hinter) {
-    return window.hinter;
-  }
-
-  return null;
+  if (typeof window === 'undefined') return null;
+  return window.hinter || null;
 }
 
 async function findSystemAudioDevice() {
-  if (!navigator.mediaDevices?.enumerateDevices) {
-    return null;
-  }
+  if (!navigator.mediaDevices?.enumerateDevices) return null;
 
   const devices = await navigator.mediaDevices.enumerateDevices();
-
-  const audioInputs = devices.filter(
-    (device) => device.kind === "audioinput"
-  );
-
   return (
-    audioInputs.find(
+    devices.find(
       (device) =>
-        device.label === SYSTEM_AUDIO_LABEL ||
-        device.label.toLowerCase().includes("hinter-system-audio")
+        device.kind === 'audioinput' &&
+        (device.label === SYSTEM_AUDIO_LABEL ||
+          device.label.toLowerCase().includes('hinter-system-audio'))
     ) || null
   );
 }
 
 /**
- * Resample Float32 audio to 16 kHz and convert it to signed 16-bit PCM.
+ * Resample Float32 mono audio to 16 kHz and convert to signed 16-bit PCM.
  */
-function floatToPcm16(input, sourceRate) {
+function floatTo16BitPCM(input, sourceRate = 48000) {
   if (!input || input.length === 0) {
     return new ArrayBuffer(0);
   }
 
-  if (!sourceRate || sourceRate <= 0) {
-    sourceRate = 48000;
-  }
+  let samples = input;
 
-  if (sourceRate === TARGET_SAMPLE_RATE) {
-    const output = new ArrayBuffer(input.length * 2);
-    const view = new DataView(output);
+  if (sourceRate !== TARGET_SAMPLE_RATE && sourceRate > 0) {
+    const ratio = sourceRate / TARGET_SAMPLE_RATE;
+    const newLength = Math.max(1, Math.round(input.length / ratio));
+    const resampled = new Float32Array(newLength);
 
-    for (let i = 0; i < input.length; i += 1) {
-      const sample = Math.max(-1, Math.min(1, input[i] || 0));
-
-      view.setInt16(
-        i * 2,
-        sample < 0 ? sample * 0x8000 : sample * 0x7fff,
-        true
-      );
+    for (let i = 0; i < newLength; i += 1) {
+      const srcIndex = i * ratio;
+      const left = Math.floor(srcIndex);
+      const right = Math.min(left + 1, input.length - 1);
+      const frac = srcIndex - left;
+      resampled[i] = input[left] * (1 - frac) + input[right] * frac;
     }
 
-    return output;
+    samples = resampled;
   }
 
-  const ratio = sourceRate / TARGET_SAMPLE_RATE;
-  const outputLength = Math.max(
-    1,
-    Math.floor(input.length / ratio)
-  );
-
-  const output = new ArrayBuffer(outputLength * 2);
+  const output = new ArrayBuffer(samples.length * 2);
   const view = new DataView(output);
 
-  for (let i = 0; i < outputLength; i += 1) {
-    const sourcePosition = i * ratio;
-
-    const leftIndex = Math.floor(sourcePosition);
-    const rightIndex = Math.min(
-      leftIndex + 1,
-      input.length - 1
-    );
-
-    const fraction = sourcePosition - leftIndex;
-
-    const leftSample = input[leftIndex] || 0;
-    const rightSample = input[rightIndex] || 0;
-
-    const interpolated =
-      leftSample +
-      (rightSample - leftSample) * fraction;
-
-    const sample = Math.max(
-      -1,
-      Math.min(1, interpolated)
-    );
-
-    view.setInt16(
-      i * 2,
-      sample < 0 ? sample * 0x8000 : sample * 0x7fff,
-      true
-    );
+  for (let i = 0; i < samples.length; i += 1) {
+    const s = Math.max(-1, Math.min(1, samples[i]));
+    view.setInt16(i * 2, s < 0 ? s * 0x8000 : s * 0x7fff, true);
   }
 
   return output;
 }
 
-export function useWhisper({
-  onTranscript,
-  onError,
-  socket,
-}) {
+function stopTracks(stream) {
+  if (!stream) return;
+  try {
+    stream.getTracks().forEach((track) => {
+      track.onended = null;
+      track.stop();
+    });
+  } catch (_) {
+    /* ignore */
+  }
+}
+
+/**
+ * Live audio capture → 16 kHz PCM → Socket.IO transcription:audio
+ *
+ * Paths:
+ * - Mic only (always)
+ * - Electron Linux: mic + Hinter-System-Audio monitor (mixed)
+ * - Browser: optional getDisplayMedia tab/screen audio (mixed)
+ */
+export function useWhisper({ onTranscript, onInterim, onError, socket }) {
   const [listening, setListening] = useState(false);
   const [level, setLevel] = useState(0);
-  const [systemAudioState, setSystemAudioState] =
-    useState("idle");
+  const [systemAudioState, setSystemAudioState] = useState('idle');
+  const [audioSource, setAudioSource] = useState('mic');
 
   const streamRef = useRef(null);
   const systemStreamRef = useRef(null);
-
+  const displayStreamRef = useRef(null);
   const mixCtxRef = useRef(null);
-  const ctxRef = useRef(null);
-
+  const meterCtxRef = useRef(null);
   const analyserRef = useRef(null);
   const rafRef = useRef(null);
-
-  const recorderRef = useRef(null);
   const processorRef = useRef(null);
-
   const socketHandlersRef = useRef(null);
+  const listeningRef = useRef(false);
 
-  /**
-   * Check whether the Electron/PipeWire system-audio
-   * source is available.
-   */
   useEffect(() => {
     let cancelled = false;
 
@@ -138,699 +104,389 @@ export function useWhisper({
         const api = getHinterAPI();
 
         if (!api?.systemAudio?.listMonitors) {
-          if (!cancelled) {
-            setSystemAudioState("unavailable");
-          }
-
+          if (!cancelled) setSystemAudioState('browser');
           return;
         }
 
-        const monitors =
-          await api.systemAudio.listMonitors();
-
-        if (cancelled) {
-          return;
-        }
+        const monitors = await api.systemAudio.listMonitors();
+        if (cancelled) return;
 
         if (!monitors || monitors.length === 0) {
-          setSystemAudioState("unavailable");
+          setSystemAudioState('unavailable');
           return;
         }
 
-        const device =
-          await findSystemAudioDevice();
+        const preferred = monitors[0];
 
+        try {
+          await api.systemAudio.startCapture(preferred);
+        } catch (err) {
+          console.warn('[system-audio] startCapture probe failed:', err);
+        }
+
+        const device = await findSystemAudioDevice();
         if (!cancelled) {
-          setSystemAudioState(
-            device ? "ready" : "unavailable"
-          );
+          setSystemAudioState(device ? 'ready' : 'unavailable');
         }
       } catch (error) {
-        console.warn(
-          "[system-audio] device detection failed:",
-          error
-        );
-
-        if (!cancelled) {
-          setSystemAudioState("unavailable");
-        }
+        console.warn('[system-audio] device detection failed:', error);
+        if (!cancelled) setSystemAudioState('unavailable');
       }
     }
 
     checkSystemAudio();
-
     return () => {
       cancelled = true;
     };
   }, []);
 
-  /**
-   * Stop the audio level meter.
-   */
   const stopLevelMeter = useCallback(() => {
     if (rafRef.current) {
       cancelAnimationFrame(rafRef.current);
       rafRef.current = null;
     }
-
-    if (ctxRef.current) {
-      ctxRef.current.close().catch(() => {});
-      ctxRef.current = null;
+    if (meterCtxRef.current) {
+      meterCtxRef.current.close().catch(() => {});
+      meterCtxRef.current = null;
     }
-
-    if (analyserRef.current) {
-      analyserRef.current = null;
-    }
-
+    analyserRef.current = null;
     setLevel(0);
   }, []);
 
-  /**
-   * Start the audio level meter.
-   */
   const startLevelMeter = useCallback((stream) => {
     try {
-      if (
-        typeof AudioContext === "undefined" ||
-        !stream
-      ) {
-        return;
-      }
+      if (typeof AudioContext === 'undefined' || !stream) return;
 
       const ctx = new AudioContext();
-
-      ctxRef.current = ctx;
-
-      const source =
-        ctx.createMediaStreamSource(stream);
-
-      const analyser =
-        ctx.createAnalyser();
-
+      meterCtxRef.current = ctx;
+      const source = ctx.createMediaStreamSource(stream);
+      const analyser = ctx.createAnalyser();
       analyser.fftSize = 256;
-
       source.connect(analyser);
-
       analyserRef.current = analyser;
 
-      const data =
-        new Uint8Array(
-          analyser.frequencyBinCount
-        );
+      const data = new Uint8Array(analyser.frequencyBinCount);
 
       const tick = () => {
-        if (!analyserRef.current) {
-          return;
-        }
-
         analyser.getByteFrequencyData(data);
-
         let sum = 0;
-
-        for (let i = 0; i < data.length; i += 1) {
-          sum += data[i];
-        }
-
-        const average = data.length
-          ? sum / data.length
-          : 0;
-
+        for (let i = 0; i < data.length; i += 1) sum += data[i];
         setLevel(
-          Math.min(
-            100,
-            Math.round((average / 80) * 100)
-          )
+          Math.min(100, Math.round((sum / data.length / 80) * 100))
         );
-
-        rafRef.current =
-          requestAnimationFrame(tick);
+        rafRef.current = requestAnimationFrame(tick);
       };
 
       tick();
     } catch (error) {
-      console.warn(
-        "[audio] level meter unavailable:",
-        error
-      );
+      console.warn('[audio] level meter failed:', error);
     }
   }, []);
 
-  /**
-   * Stop everything.
-   */
-  const stop = useCallback(() => {
-    const handlers =
-      socketHandlersRef.current;
-
+  const detachSocketHandlers = useCallback(() => {
+    const handlers = socketHandlersRef.current;
     if (socket && handlers) {
       try {
-        if (
-          typeof socket.off === "function"
-        ) {
-          socket.off(
-            "transcript",
-            handlers.transcript
-          );
-
-          socket.off(
-            "transcription_interim",
-            handlers.interim
-          );
-
-          socket.off(
-            "transcription_error",
-            handlers.error
-          );
+        if (typeof socket.off === 'function') {
+          socket.off('transcript', handlers.transcript);
+          socket.off('transcription:final', handlers.final);
+          socket.off('transcription:interim', handlers.interim);
+          socket.off('transcription_error', handlers.error);
         }
-
-        if (
-          typeof socket.emit === "function"
-        ) {
-          socket.emit("transcription:stop");
+        if (typeof socket.emit === 'function') {
+          socket.emit('transcription:stop');
         }
       } catch (error) {
-        console.warn(
-          "[socket] cleanup failed:",
-          error
-        );
+        console.warn('[socket] cleanup failed:', error);
       }
-
-      socketHandlersRef.current = null;
     }
+    socketHandlersRef.current = null;
+  }, [socket]);
 
-    /**
-     * Stop PCM processor.
-     */
+  const stop = useCallback(() => {
+    listeningRef.current = false;
+    detachSocketHandlers();
+
     if (processorRef.current) {
       try {
-        processorRef.current.onaudioprocess =
-          null;
-
-        processorRef.current.disconnect?.();
-      } catch (_) {}
-
+        processorRef.current.disconnect();
+        processorRef.current.onaudioprocess = null;
+      } catch (_) {
+        /* ignore */
+      }
       processorRef.current = null;
     }
 
-    /**
-     * Stop MediaRecorder fallback.
-     */
-    if (recorderRef.current) {
-      try {
-        if (
-          recorderRef.current.state ===
-          "recording"
-        ) {
-          recorderRef.current.stop();
-        }
-      } catch (_) {}
-
-      recorderRef.current = null;
-    }
-
-    /**
-     * Stop microphone tracks.
-     */
-    if (streamRef.current) {
-      streamRef.current
-        .getTracks()
-        .forEach((track) => {
-          try {
-            track.stop();
-          } catch (_) {}
-        });
-
-      streamRef.current = null;
-    }
-
-    /**
-     * Stop system-audio tracks.
-     */
-    if (systemStreamRef.current) {
-      systemStreamRef.current
-        .getTracks()
-        .forEach((track) => {
-          try {
-            track.stop();
-          } catch (_) {}
-        });
-
-      systemStreamRef.current = null;
-    }
-
-    /**
-     * Close mixing AudioContext.
-     */
     if (mixCtxRef.current) {
-      try {
-        mixCtxRef.current.close().catch(() => {});
-      } catch (_) {}
-
+      mixCtxRef.current.close().catch(() => {});
       mixCtxRef.current = null;
     }
 
+    stopTracks(streamRef.current);
+    streamRef.current = null;
+    stopTracks(systemStreamRef.current);
+    systemStreamRef.current = null;
+    stopTracks(displayStreamRef.current);
+    displayStreamRef.current = null;
+
     stopLevelMeter();
-
     setListening(false);
-
-    setSystemAudioState((current) =>
-      current === "capturing"
-        ? "ready"
-        : current
-    );
-  }, [socket, stopLevelMeter]);
+    setAudioSource('mic');
+  }, [detachSocketHandlers, stopLevelMeter]);
 
   /**
-   * Start microphone + optional system audio.
+   * Browser: share a tab/window/screen with audio.
+   * Chrome often requires video:true; we keep audio tracks only.
    */
-  const start = useCallback(async () => {
-    /**
-     * Always clean up an existing session first.
-     */
-    stop();
-
-    let micStream;
-
-    /**
-     * ---------------------------------------------------------
-     * 1. Capture physical microphone
-     * ---------------------------------------------------------
-     *
-     * IMPORTANT:
-     * We do NOT require Socket.IO here.
-     *
-     * This allows the hook to work independently during
-     * testing and while the backend connection is starting.
-     */
-    try {
-      if (
-        !navigator.mediaDevices?.getUserMedia
-      ) {
-        throw new Error(
-          "Microphone capture is not supported in this environment."
-        );
-      }
-
-      micStream =
-        await navigator.mediaDevices.getUserMedia({
-          audio: {
-            echoCancellation: true,
-            noiseSuppression: true,
-            autoGainControl: true,
-          },
-          video: false,
-        });
-    } catch (error) {
-      console.error(
-        "[microphone] capture failed:",
-        error
-      );
-
-      onError?.(
-        error?.message ||
-          "Microphone access denied"
-      );
-
-      throw error;
+  const captureDisplayAudio = useCallback(async () => {
+    if (!navigator.mediaDevices?.getDisplayMedia) {
+      throw new Error('getDisplayMedia is not supported in this browser');
     }
 
-    streamRef.current = micStream;
+    const displayStream = await navigator.mediaDevices.getDisplayMedia({
+      video: {
+        width: 1,
+        height: 1,
+        frameRate: 1,
+      },
+      audio: {
+        echoCancellation: false,
+        noiseSuppression: false,
+        autoGainControl: false,
+      },
+    });
 
-    /**
-     * ---------------------------------------------------------
-     * 2. Find system audio device
-     * ---------------------------------------------------------
-     */
-    let combinedStream = micStream;
+    displayStream.getVideoTracks().forEach((track) => {
+      track.stop();
+      displayStream.removeTrack(track);
+    });
 
-    try {
-      const systemDevice =
-        await findSystemAudioDevice();
-
-      if (!systemDevice) {
-        console.warn(
-          "[system-audio] Hinter-System-Audio device not found"
-        );
-
-        setSystemAudioState(
-          "unavailable"
-        );
-
-        startLevelMeter(micStream);
-      } else {
-        console.info(
-          "[system-audio] Using device:",
-          systemDevice.label,
-          systemDevice.deviceId
-        );
-
-        setSystemAudioState(
-          "capturing"
-        );
-
-        /**
-         * -----------------------------------------------------
-         * 3. Capture system audio
-         * -----------------------------------------------------
-         */
-        const systemStream =
-          await navigator.mediaDevices.getUserMedia({
-            audio: {
-              deviceId: {
-                exact:
-                  systemDevice.deviceId,
-              },
-              channelCount: 2,
-              sampleRate: 48000,
-              echoCancellation: false,
-              noiseSuppression: false,
-              autoGainControl: false,
-            },
-            video: false,
-          });
-
-        if (
-          !systemStream.getAudioTracks()
-            .length
-        ) {
-          throw new Error(
-            "Hinter-System-Audio returned no audio track"
-          );
-        }
-
-        systemStreamRef.current =
-          systemStream;
-
-        /**
-         * -----------------------------------------------------
-         * 4. Mix microphone + system audio
-         * -----------------------------------------------------
-         */
-        if (
-          typeof AudioContext ===
-          "undefined"
-        ) {
-          throw new Error(
-            "AudioContext is unavailable."
-          );
-        }
-
-        const audioCtx =
-          new AudioContext();
-
-        mixCtxRef.current =
-          audioCtx;
-
-        const micSource =
-          audioCtx.createMediaStreamSource(
-            micStream
-          );
-
-        const systemSource =
-          audioCtx.createMediaStreamSource(
-            systemStream
-          );
-
-        const destination =
-          audioCtx.createMediaStreamDestination();
-
-        micSource.connect(destination);
-        systemSource.connect(destination);
-
-        combinedStream =
-          destination.stream;
-
-        startLevelMeter(
-          combinedStream
-        );
-
-        console.info(
-          "[system-audio] Microphone + system audio mixed successfully"
-        );
-      }
-    } catch (error) {
-      console.warn(
-        "[system-audio] Capture failed; falling back to microphone:",
-        error
+    const audioTracks = displayStream.getAudioTracks();
+    if (!audioTracks.length) {
+      stopTracks(displayStream);
+      throw new Error(
+        'No tab/system audio track. In the share dialog, enable “Share audio”.'
       );
-
-      setSystemAudioState("error");
-
-      if (systemStreamRef.current) {
-        systemStreamRef.current
-          .getTracks()
-          .forEach((track) => {
-            try {
-              track.stop();
-            } catch (_) {}
-          });
-
-        systemStreamRef.current =
-          null;
-      }
-
-      startLevelMeter(micStream);
     }
 
-    /**
-     * ---------------------------------------------------------
-     * 5. Connect to Socket.IO if available
-     * ---------------------------------------------------------
-     *
-     * Socket.IO is optional here so the hook can still be
-     * tested and microphone capture can still work when the
-     * backend has not connected yet.
-     */
-    if (
-      socket &&
-      typeof socket.emit === "function"
-    ) {
-      /**
-       * Final transcript.
-       */
-      const handleTranscript = (payload) => {
-        const text =
-          typeof payload === "string"
-            ? payload
-            : payload?.text || "";
-
-        if (text) {
-          onTranscript?.(text);
+    audioTracks.forEach((track) => {
+      track.onended = () => {
+        if (listeningRef.current) {
+          onError?.(
+            'Tab/screen share ended. Stop and start listening again if needed.'
+          );
         }
       };
+    });
 
-      /**
-       * Interim/live transcript.
-       *
-       * We pass this through to onTranscript as well so
-       * the UI can display the live text.
-       */
+    return displayStream;
+  }, [onError]);
+
+  const mixStreams = useCallback(async (micStream, secondaryStream) => {
+    const audioCtx = new AudioContext();
+    mixCtxRef.current = audioCtx;
+
+    const destination = audioCtx.createMediaStreamDestination();
+    const micSource = audioCtx.createMediaStreamSource(micStream);
+    micSource.connect(destination);
+
+    if (secondaryStream?.getAudioTracks?.().length) {
+      const secondarySource =
+        audioCtx.createMediaStreamSource(secondaryStream);
+      secondarySource.connect(destination);
+    }
+
+    return destination.stream;
+  }, []);
+
+  const startPcmStreaming = useCallback(
+    (combinedStream) => {
+      if (!socket || typeof socket.emit !== 'function') {
+        throw new Error('Socket is not connected');
+      }
+
+      const handleFinal = (payload) => {
+        const text =
+          typeof payload === 'string' ? payload : payload?.text || '';
+        if (text) onTranscript?.(text);
+      };
+
       const handleInterim = (payload) => {
         const text =
-          typeof payload === "string"
-            ? payload
-            : payload?.text || "";
-
-        if (text) {
-          onTranscript?.(text);
-        }
+          typeof payload === 'string' ? payload : payload?.text || '';
+        if (text) onInterim?.(text);
       };
 
-      /**
-       * Backend transcription error.
-       */
       const handleError = (payload) => {
         const message =
-          typeof payload === "string"
+          typeof payload === 'string'
             ? payload
-            : payload?.message ||
-              "Live transcription error";
-
+            : payload?.message || 'Live transcription error';
         onError?.(message);
       };
 
       socketHandlersRef.current = {
-        transcript: handleTranscript,
+        transcript: handleFinal,
+        final: handleFinal,
         interim: handleInterim,
         error: handleError,
       };
 
-      if (
-        typeof socket.on === "function"
-      ) {
-        socket.on(
-          "transcript",
-          handleTranscript
-        );
+      // Match backend emits: transcription:interim | transcription:final | transcript
+      socket.on('transcription:final', handleFinal);
+      socket.on('transcript', handleFinal);
+      socket.on('transcription:interim', handleInterim);
+      socket.on('transcription_error', handleError);
 
-        socket.on(
-          "transcription_interim",
-          handleInterim
-        );
+      socket.emit('transcription:start');
 
-        socket.on(
-          "transcription_error",
-          handleError
-        );
-      }
-
-      /**
-       * Tell Flask/Gemini to start a new
-       * transcription session.
-       */
-      socket.emit(
-        "transcription:start"
-      );
-
-      /**
-       * -----------------------------------------------------
-       * 6. Convert microphone/system audio to PCM
-       * -----------------------------------------------------
-       */
       let pcmCtx = mixCtxRef.current;
-
       if (!pcmCtx) {
-        if (
-          typeof AudioContext ===
-          "undefined"
-        ) {
-          throw new Error(
-            "AudioContext is unavailable."
-          );
-        }
-
         pcmCtx = new AudioContext();
-
-        mixCtxRef.current =
-          pcmCtx;
+        mixCtxRef.current = pcmCtx;
       }
 
-      const audioSource =
-        pcmCtx.createMediaStreamSource(
-          combinedStream
-        );
+      const audioSourceNode = pcmCtx.createMediaStreamSource(combinedStream);
 
-      if (
-        typeof pcmCtx.createScriptProcessor !==
-        "function"
-      ) {
-        throw new Error(
-          "PCM audio processing is unavailable in this Electron environment."
-        );
+      if (typeof pcmCtx.createScriptProcessor !== 'function') {
+        throw new Error('PCM audio processing is unavailable');
       }
 
-      const processor =
-        pcmCtx.createScriptProcessor(
-          4096,
-          1,
-          1
-        );
+      const processor = pcmCtx.createScriptProcessor(4096, 1, 1);
+      processorRef.current = processor;
 
-      processor.onaudioprocess = (
-        event
-      ) => {
-        if (
-          !socket ||
-          typeof socket.emit !==
-            "function"
-        ) {
-          return;
-        }
+      processor.onaudioprocess = (event) => {
+        if (!listeningRef.current) return;
+        if (!socket || typeof socket.emit !== 'function') return;
 
         try {
-          const input =
-            event.inputBuffer.getChannelData(
-              0
-            );
-
-          const pcm =
-            floatToPcm16(
-              input,
-              pcmCtx.sampleRate ||
-                48000
-            );
-
+          const input = event.inputBuffer.getChannelData(0);
+          const rate = pcmCtx.sampleRate || 48000;
+          const pcm = floatTo16BitPCM(input, rate);
           if (pcm.byteLength > 0) {
-            socket.emit(
-              "transcription:audio",
-              pcm
-            );
+            socket.emit('transcription:audio', pcm);
           }
         } catch (error) {
-          console.warn(
-            "[audio] PCM processing failed:",
-            error
-          );
+          console.warn('[audio] PCM processing failed:', error);
         }
       };
 
-      audioSource.connect(processor);
+      audioSourceNode.connect(processor);
+      processor.connect(pcmCtx.destination);
+    },
+    [socket, onTranscript, onInterim, onError]
+  );
 
-      /**
-       * Keep the ScriptProcessor alive.
-       */
-      processor.connect(
-        pcmCtx.destination
-      );
+  const start = useCallback(
+    async ({ shareDisplayAudio = false } = {}) => {
+      stop();
 
-      processorRef.current =
-        processor;
+      if (!navigator.mediaDevices?.getUserMedia) {
+        throw new Error('getUserMedia is not available');
+      }
 
-      console.info(
-        "[whisper] PCM streaming started"
-      );
-    } else {
-      /**
-       * No Socket.IO connection.
-       *
-       * We intentionally do not throw here.
-       * This keeps the hook usable in isolation/tests.
-       */
-      console.warn(
-        "[whisper] Socket.IO connection is not available; audio capture started without backend streaming."
-      );
+      const micStream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
+          channelCount: 1,
+        },
+        video: false,
+      });
 
-      /**
-       * Provide a MediaRecorder fallback if
-       * the browser/Electron environment supports it.
-       */
-      if (
-        typeof MediaRecorder !==
-        "undefined"
-      ) {
+      streamRef.current = micStream;
+      let combinedStream = micStream;
+      let sourceLabel = 'mic';
+
+      // Electron Linux system audio
+      try {
+        const api = getHinterAPI();
+        if (api?.systemAudio?.listMonitors) {
+          const monitors = await api.systemAudio.listMonitors();
+          if (monitors?.length) {
+            await api.systemAudio.startCapture(monitors[0]);
+            await navigator.mediaDevices.enumerateDevices();
+
+            const systemDevice = await findSystemAudioDevice();
+            if (systemDevice) {
+              const systemStream = await navigator.mediaDevices.getUserMedia({
+                audio: {
+                  deviceId: { exact: systemDevice.deviceId },
+                  channelCount: 2,
+                  echoCancellation: false,
+                  noiseSuppression: false,
+                  autoGainControl: false,
+                },
+                video: false,
+              });
+
+              if (systemStream.getAudioTracks().length) {
+                systemStreamRef.current = systemStream;
+                combinedStream = await mixStreams(micStream, systemStream);
+                sourceLabel = 'mic+system';
+                setSystemAudioState('active');
+                console.info('[system-audio] mic + system mixed');
+              }
+            } else {
+              setSystemAudioState('unavailable');
+            }
+          }
+        }
+      } catch (error) {
+        console.warn(
+          '[system-audio] Capture failed; falling back to microphone:',
+          error
+        );
+        setSystemAudioState('error');
+        stopTracks(systemStreamRef.current);
+        systemStreamRef.current = null;
+        combinedStream = micStream;
+        sourceLabel = 'mic';
+      }
+
+      // Browser tab/screen audio (explicit opt-in)
+      if (shareDisplayAudio && sourceLabel === 'mic') {
         try {
-          recorderRef.current =
-            new MediaRecorder(
-              combinedStream
-            );
-
-          recorderRef.current.start();
+          const displayStream = await captureDisplayAudio();
+          displayStreamRef.current = displayStream;
+          combinedStream = await mixStreams(micStream, displayStream);
+          sourceLabel = 'mic+display';
+          setSystemAudioState('display');
+          console.info('[display-audio] mic + tab/screen audio mixed');
         } catch (error) {
-          console.warn(
-            "[whisper] MediaRecorder fallback unavailable:",
-            error
-          );
-
-          recorderRef.current =
-            null;
+          console.warn('[display-audio] failed:', error);
+          setSystemAudioState('error');
+          onError?.(error.message || String(error));
+          combinedStream = micStream;
+          sourceLabel = 'mic';
         }
       }
-    }
 
-    setListening(true);
-  }, [
-    stop,
-    startLevelMeter,
-    onError,
-    onTranscript,
-    socket,
-  ]);
+      startLevelMeter(combinedStream);
+      startPcmStreaming(combinedStream);
+
+      listeningRef.current = true;
+      setAudioSource(sourceLabel);
+      setListening(true);
+      console.info('[whisper] PCM streaming started:', sourceLabel);
+    },
+    [
+      stop,
+      mixStreams,
+      captureDisplayAudio,
+      startLevelMeter,
+      startPcmStreaming,
+      onError,
+    ]
+  );
 
   return {
     listening,
     level,
+    systemAudioState,
+    audioSource,
     start,
     stop,
-    systemAudioState,
   };
 }

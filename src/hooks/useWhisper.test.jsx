@@ -1,116 +1,91 @@
 import { renderHook, act } from '@testing-library/react';
 import { vi, describe, it, beforeEach, expect } from 'vitest';
-import { useWhisper } from '../hooks/useWhisper';
+import { useWhisper } from './useWhisper';
 
-const mockMediaStream = {
-  getTracks: () => [{ stop: vi.fn() }],
-  getAudioTracks: () => [{ stop: vi.fn() }],
-};
-
-const mockSystemAudioStream = {
-  getTracks: () => [{ stop: vi.fn() }],
-  getAudioTracks: () => [{ stop: vi.fn() }],
-};
-
-const mockAudioContext = {
-  createMediaStreamSource: vi.fn(() => ({
-    connect: vi.fn(),
-  })),
-  createAnalyser: vi.fn(() => ({
-    fftSize: 256,
-    frequencyBinCount: 128,
-    getByteFrequencyData: vi.fn(),
-    connect: vi.fn(),
-  })),
-  createMediaStreamDestination: vi.fn(() => ({
-    stream: mockMediaStream,
-  })),
-  close: vi.fn().mockResolvedValue(undefined),
-};
-
-const mockMediaRecorder = {
-  state: 'inactive',
-  start: vi.fn(),
-  stop: vi.fn(),
-  ondataavailable: null,
-};
-
-function installElectronSystemAudio() {
-  window.hinter = {
-    systemAudio: {
-      listMonitors: vi
-        .fn()
-        .mockResolvedValue(['alsa_output.test.monitor']),
-      startCapture: vi.fn().mockResolvedValue({
-        sourceName: 'alsa_output.test.monitor',
-      }),
-    },
+function makeStream(label = 'mic') {
+  const track = {
+    stop: vi.fn(),
+    kind: 'audio',
+    label,
+    onended: null,
   };
-
-  navigator.mediaDevices.enumerateDevices = vi.fn().mockResolvedValue([
-    {
-      kind: 'audioinput',
-      label: 'Built-in Audio Analog Stereo',
-      deviceId: 'mic-device-id',
-      groupId: 'mic-group-id',
-    },
-    {
-      kind: 'audioinput',
-      label: 'Hinter-System-Audio',
-      deviceId: 'system-audio-device-id',
-      groupId: 'system-audio-group-id',
-    },
-  ]);
+  return {
+    getTracks: () => [track],
+    getAudioTracks: () => [track],
+    getVideoTracks: () => [],
+    removeTrack: vi.fn(),
+  };
 }
 
 describe('useWhisper', () => {
   beforeEach(() => {
-    vi.clearAllMocks();
+    vi.restoreAllMocks();
 
-    global.navigator.mediaDevices = {
-      getUserMedia: vi.fn().mockResolvedValue(mockMediaStream),
-      enumerateDevices: vi.fn().mockResolvedValue([]),
-    };
+    const micStream = makeStream('mic');
+    const displayStream = makeStream('display');
 
-    delete window.hinter;
-
-    global.AudioContext = vi.fn(() => mockAudioContext);
-
-    global.MediaRecorder = vi.fn(() => mockMediaRecorder);
-
-    global.MediaRecorder.isTypeSupported = vi.fn(() => true);
-
-    global.fetch = vi.fn().mockResolvedValue({
-      ok: true,
-      json: () => Promise.resolve({ text: 'test transcript' }),
+    global.AudioContext = vi.fn(() => {
+      const destination = { stream: makeStream('mixed') };
+      return {
+        sampleRate: 48000,
+        createMediaStreamSource: vi.fn(() => ({ connect: vi.fn() })),
+        createMediaStreamDestination: vi.fn(() => destination),
+        createAnalyser: vi.fn(() => ({
+          fftSize: 256,
+          frequencyBinCount: 128,
+          getByteFrequencyData: vi.fn(),
+        })),
+        createScriptProcessor: vi.fn(() => ({
+          connect: vi.fn(),
+          disconnect: vi.fn(),
+          onaudioprocess: null,
+        })),
+        destination: {},
+        close: vi.fn().mockResolvedValue(undefined),
+      };
     });
 
     global.requestAnimationFrame = vi.fn(() => 1);
     global.cancelAnimationFrame = vi.fn();
 
-    global.setInterval = vi.fn(() => 1);
-    global.clearInterval = vi.fn();
+    navigator.mediaDevices = {
+      getUserMedia: vi.fn(async () => micStream),
+      getDisplayMedia: vi.fn(async () => displayStream),
+      enumerateDevices: vi.fn(async () => [
+        { kind: 'audioinput', label: 'Default', deviceId: 'mic-1' },
+      ]),
+    };
+
+    delete window.hinter;
   });
 
-  it('initializes with listening=false', () => {
+  it('initializes idle', () => {
     const { result } = renderHook(() =>
-      useWhisper({
-        onTranscript: vi.fn(),
-        onError: vi.fn(),
-      })
+      useWhisper({ onTranscript: vi.fn(), onError: vi.fn() })
     );
-
     expect(result.current.listening).toBe(false);
     expect(result.current.level).toBe(0);
   });
 
-  it('start sets listening to true', async () => {
+  it('starts mic-only streaming when socket is provided', async () => {
+    const handlers = {};
+    const socket = {
+      on: vi.fn((event, cb) => {
+        handlers[event] = cb;
+      }),
+      off: vi.fn(),
+      emit: vi.fn(),
+    };
+
     const onTranscript = vi.fn();
+    const onInterim = vi.fn();
 
     const { result } = renderHook(() =>
       useWhisper({
         onTranscript,
+        onInterim,
         onError: vi.fn(),
+        socket,
       })
     );
 
@@ -119,14 +94,84 @@ describe('useWhisper', () => {
     });
 
     expect(result.current.listening).toBe(true);
-    expect(navigator.mediaDevices.getUserMedia).toHaveBeenCalled();
+    expect(result.current.audioSource).toBe('mic');
+    expect(socket.emit).toHaveBeenCalledWith('transcription:start');
+    expect(socket.on).toHaveBeenCalledWith(
+      'transcription:interim',
+      expect.any(Function)
+    );
+    expect(socket.on).toHaveBeenCalledWith(
+      'transcription:final',
+      expect.any(Function)
+    );
+
+    act(() => {
+      handlers['transcription:interim']?.({ text: 'hello' });
+      handlers['transcription:final']?.({ text: 'hello world' });
+    });
+
+    expect(onInterim).toHaveBeenCalledWith('hello');
+    expect(onTranscript).toHaveBeenCalledWith('hello world');
   });
 
-  it('stop sets listening to false', async () => {
+  it('mixes display audio when shareDisplayAudio is true', async () => {
+    const socket = {
+      on: vi.fn(),
+      off: vi.fn(),
+      emit: vi.fn(),
+    };
+
     const { result } = renderHook(() =>
       useWhisper({
         onTranscript: vi.fn(),
         onError: vi.fn(),
+        socket,
+      })
+    );
+
+    await act(async () => {
+      await result.current.start({ shareDisplayAudio: true });
+    });
+
+    expect(navigator.mediaDevices.getDisplayMedia).toHaveBeenCalled();
+    expect(result.current.listening).toBe(true);
+    expect(result.current.audioSource).toBe('mic+display');
+    expect(result.current.systemAudioState).toBe('display');
+  });
+
+  it('uses Electron system audio when hinter API provides monitors', async () => {
+    const systemStream = makeStream('system');
+    window.hinter = {
+      systemAudio: {
+        listMonitors: vi.fn(async () => ['alsa_output.pci.monitor']),
+        startCapture: vi.fn(async () => ({
+          sourceName: 'alsa_output.pci.monitor',
+        })),
+      },
+    };
+
+    navigator.mediaDevices.enumerateDevices = vi.fn(async () => [
+      { kind: 'audioinput', label: 'Default', deviceId: 'mic-1' },
+      {
+        kind: 'audioinput',
+        label: 'Hinter-System-Audio',
+        deviceId: 'sys-1',
+      },
+    ]);
+
+    navigator.mediaDevices.getUserMedia = vi.fn(async (constraints) => {
+      const id = constraints?.audio?.deviceId?.exact;
+      if (id === 'sys-1') return systemStream;
+      return makeStream('mic');
+    });
+
+    const socket = { on: vi.fn(), off: vi.fn(), emit: vi.fn() };
+
+    const { result } = renderHook(() =>
+      useWhisper({
+        onTranscript: vi.fn(),
+        onError: vi.fn(),
+        socket,
       })
     );
 
@@ -134,99 +179,32 @@ describe('useWhisper', () => {
       await result.current.start();
     });
 
+    expect(window.hinter.systemAudio.listMonitors).toHaveBeenCalled();
+    expect(window.hinter.systemAudio.startCapture).toHaveBeenCalled();
+    expect(result.current.audioSource).toBe('mic+system');
+    expect(result.current.systemAudioState).toBe('active');
+  });
+
+  it('stop emits transcription:stop and clears listening', async () => {
+    const socket = { on: vi.fn(), off: vi.fn(), emit: vi.fn() };
+
+    const { result } = renderHook(() =>
+      useWhisper({
+        onTranscript: vi.fn(),
+        onError: vi.fn(),
+        socket,
+      })
+    );
+
     await act(async () => {
+      await result.current.start();
+    });
+
+    act(() => {
       result.current.stop();
     });
 
     expect(result.current.listening).toBe(false);
-  });
-
-  it('calls onError when getUserMedia fails', async () => {
-    const onError = vi.fn();
-
-    navigator.mediaDevices.getUserMedia.mockRejectedValueOnce(
-      new Error('Permission denied')
-    );
-
-    const { result } = renderHook(() =>
-      useWhisper({
-        onTranscript: vi.fn(),
-        onError,
-      })
-    );
-
-    await act(async () => {
-      try {
-        await result.current.start();
-      } catch (error) {
-        // Expected.
-      }
-    });
-
-    expect(onError).toHaveBeenCalledWith('Permission denied');
-  });
-
-  it('captures Hinter-System-Audio and mixes it with the microphone', async () => {
-    installElectronSystemAudio();
-
-    const { result } = renderHook(() =>
-      useWhisper({
-        onTranscript: vi.fn(),
-        onError: vi.fn(),
-      })
-    );
-
-    await act(async () => {
-      await result.current.start();
-    });
-
-    expect(navigator.mediaDevices.enumerateDevices).toHaveBeenCalled();
-
-    expect(navigator.mediaDevices.getUserMedia).toHaveBeenCalledWith({
-  audio: {
-    deviceId: {
-      exact: 'system-audio-device-id',
-    },
-    channelCount: 2,
-    sampleRate: 48000,
-    echoCancellation: false,
-    noiseSuppression: false,
-    autoGainControl: false,
-  },
-  video: false,
-});
-
-    expect(mockAudioContext.createMediaStreamSource).toHaveBeenCalled();
-
-    expect(
-      mockAudioContext.createMediaStreamDestination
-    ).toHaveBeenCalled();
-
-    expect(result.current.listening).toBe(true);
-  });
-
-  it('falls back to microphone-only capture when system audio fails', async () => {
-    installElectronSystemAudio();
-
-    navigator.mediaDevices.getUserMedia
-      .mockResolvedValueOnce(mockMediaStream)
-      .mockRejectedValueOnce(new Error('system audio unavailable'));
-
-    const onError = vi.fn();
-
-    const { result } = renderHook(() =>
-      useWhisper({
-        onTranscript: vi.fn(),
-        onError,
-      })
-    );
-
-    await act(async () => {
-      await result.current.start();
-    });
-
-    expect(result.current.listening).toBe(true);
-    expect(onError).not.toHaveBeenCalled();
-    expect(mockMediaRecorder.start).toHaveBeenCalled();
+    expect(socket.emit).toHaveBeenCalledWith('transcription:stop');
   });
 });

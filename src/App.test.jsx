@@ -20,6 +20,7 @@ describe('App', () => {
       pushTranscript: vi.fn(),
       endSession: vi.fn(),
       connectionState: 'connected',
+      socket: null,
     });
     mockUseWhisper.mockReturnValue({
       listening: false,
@@ -27,6 +28,7 @@ describe('App', () => {
       start: vi.fn(),
       stop: vi.fn(),
       systemAudioState: 'unavailable',
+      audioSource: 'mic',
     });
   });
 
@@ -47,6 +49,7 @@ describe('App', () => {
       start: vi.fn(),
       stop: vi.fn(),
       systemAudioState: 'unavailable',
+      audioSource: 'mic',
     });
     render(<App />);
     expect(screen.getByRole('button', { name: 'Stop' })).toBeInTheDocument();
@@ -59,45 +62,50 @@ describe('App', () => {
 
   it('shows hint when no transcripts', () => {
     render(<App />);
-    expect(screen.getByText('Backend running + GEMINI_API_KEY in .env, then hit Listen.')).toBeInTheDocument();
+    expect(
+      screen.getByText(/Backend online, then hit Listen/i)
+    ).toBeInTheDocument();
   });
 
   it('shows suggestion hint when no suggestions', () => {
     render(<App />);
-    expect(screen.getByText('Suggestions will appear here.')).toBeInTheDocument();
+    expect(
+      screen.getByText('Suggestions will appear here.')
+    ).toBeInTheDocument();
   });
 
-  it('calls toggle on button click', () => {
-    const { container } = render(<App />);
-    const button = screen.getByRole('button', { name: 'Listen' });
-    act(() => {
-      button.click();
-    });
-    // start should be called
-  });
-
-  it('displays transcripts when available', () => {
-    // This would require more complex mocking of the internal state
-    // The component uses internal state for lines
-  });
-
-  it('displays suggestions when available', () => {
-    mockUseBackend.mockReturnValue({
-      status: { label: 'ready', kind: 'ready' },
-      setStatus: vi.fn(),
-      backendOk: true,
-      pushTranscript: vi.fn(),
-      endSession: vi.fn(),
-      connectionState: 'connected',
-    });
+  it('calls toggle on button click', async () => {
+    const start = vi.fn().mockResolvedValue(undefined);
     mockUseWhisper.mockReturnValue({
       listening: false,
       level: 0,
-      start: vi.fn(),
+      start,
       stop: vi.fn(),
       systemAudioState: 'unavailable',
+      audioSource: 'mic',
     });
     render(<App />);
-    // The component uses internal state for suggestions
+    const button = screen.getByRole('button', { name: 'Listen' });
+    await act(async () => {
+      button.click();
+    });
+    expect(start).toHaveBeenCalled();
+  });
+
+  it('displays transcripts when available', () => {
+    render(<App />);
+    expect(screen.getByText('Live transcript')).toBeInTheDocument();
+  });
+
+  it('displays suggestions when available', () => {
+    render(<App />);
+    expect(screen.getByText('AI suggestion')).toBeInTheDocument();
+  });
+
+  it('shows share tab audio checkbox when not listening', () => {
+    render(<App />);
+    expect(
+      screen.getByText(/Share tab\/screen audio/i)
+    ).toBeInTheDocument();
   });
 });

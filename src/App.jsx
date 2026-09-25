@@ -4,93 +4,75 @@ import { useBackend } from './hooks/useBackend';
 
 export default function App() {
   const [lines, setLines] = useState([]);
+  const [interim, setInterim] = useState('');
   const [suggestion, setSuggestion] = useState('');
   const [busy, setBusy] = useState(false);
+  const [shareDisplay, setShareDisplay] = useState(false);
 
   const onSuggestion = useCallback((text) => {
     setSuggestion(text);
   }, []);
 
-  const {
-    status,
-    setStatus,
-    backendOk,
-    endSession,
-    socket,
-  } = useBackend({
+  const { status, setStatus, backendOk, endSession, socket } = useBackend({
     onSuggestion,
   });
 
   const onTranscript = useCallback((text) => {
     const cleaned = (text || '').trim();
-
     if (!cleaned) return;
+    setInterim('');
+    setLines((prev) => [...prev, cleaned].slice(-40));
+  }, []);
 
-    setLines((previous) => [
-      ...previous,
-      cleaned,
-    ].slice(-40));
+  const onInterim = useCallback((text) => {
+    setInterim((text || '').trim());
   }, []);
 
   const onError = useCallback(
-    (message) => {
-      setStatus({
-        label: message || 'STT error',
-        kind: 'error',
-      });
-    },
+    (msg) => setStatus({ label: msg || 'STT error', kind: 'error' }),
     [setStatus]
   );
 
   const {
     listening,
     level,
+    systemAudioState,
+    audioSource,
     start,
     stop,
-    systemAudioState,
   } = useWhisper({
-    socket,
     onTranscript,
+    onInterim,
     onError,
+    socket,
   });
 
   const toggle = async () => {
     if (listening) {
       stop();
-
       endSession();
-
+      setInterim('');
       setStatus({
         label: backendOk ? 'ready' : 'backend offline',
         kind: backendOk ? 'ready' : 'error',
       });
-
       return;
     }
 
     if (!backendOk) {
-      setStatus({
-        label: 'backend offline',
-        kind: 'error',
-      });
-
+      setStatus({ label: 'backend offline', kind: 'error' });
       return;
     }
 
     setBusy(true);
-
     try {
-      await start();
-
+      await start({ shareDisplayAudio: shareDisplay });
       setStatus({
-        label: 'listening',
+        label: shareDisplay ? 'listening (+ tab audio)' : 'listening',
         kind: 'ready',
       });
-    } catch (error) {
-      setStatus({
-        label: error.message || 'mic/STT error',
-        kind: 'error',
-      });
+    } catch (err) {
+      setStatus({ label: err.message || 'mic/STT error', kind: 'error' });
     } finally {
       setBusy(false);
     }
@@ -100,13 +82,10 @@ export default function App() {
     <div className="overlay">
       <div className="header">
         <div className="title">
-          <span className="mark" />
+          <span className="dot" />
           <span>Hinter</span>
         </div>
-
-        <span className={`status ${status.kind}`}>
-          {status.label}
-        </span>
+        <span className={`status ${status.kind}`}>{status.label}</span>
       </div>
 
       <div className="controls">
@@ -114,48 +93,47 @@ export default function App() {
           className={`listen-btn ${listening ? 'listening' : ''}`}
           onClick={toggle}
           disabled={busy}
+          type="button"
         >
-          {busy
-            ? 'Starting…'
-            : listening
-              ? 'Stop'
-              : 'Listen'}
+          {busy ? 'Starting…' : listening ? 'Stop' : 'Listen'}
         </button>
-
         <div className="level-wrap">
-          <div
-            className="level-bar"
-            style={{
-              width: `${level}%`,
-            }}
-          />
+          <div className="level-bar" style={{ width: `${level}%` }} />
         </div>
       </div>
 
+      {!listening && (
+        <label className="share-toggle">
+          <input
+            type="checkbox"
+            checked={shareDisplay}
+            onChange={(e) => setShareDisplay(e.target.checked)}
+          />
+          Share tab/screen audio (browser)
+        </label>
+      )}
+
+      <div className="section-label">Live transcript</div>
       <div className="transcript">
-        {lines.length === 0 ? (
-          <div className="empty">
-            {listening
-              ? 'Listening…'
-              : 'Backend running + GEMINI_API_KEY in .env, then hit Listen.'}
-          </div>
+        {lines.length === 0 && !interim ? (
+          <span className="hint">
+            Backend online, then hit Listen. Optional: share tab audio for
+            meeting capture in the browser.
+          </span>
         ) : (
-          lines.map((line, index) => (
-            <div
-              className="transcript-line"
-              key={`${index}-${line}`}
-            >
-              {line}
-            </div>
-          ))
+          <>
+            {lines.map((line, i) => (
+              <div className="line" key={`${i}-${line.slice(0, 16)}`}>
+                {line}
+              </div>
+            ))}
+            {interim ? <div className="line interim">{interim}</div> : null}
+          </>
         )}
       </div>
 
       <div className="suggestion">
-        <div className="suggestion-label">
-          AI suggestion
-        </div>
-
+        <div className="suggestion-label">AI suggestion</div>
         <div className="suggestion-text">
           {suggestion || 'Suggestions will appear here.'}
         </div>
@@ -163,6 +141,7 @@ export default function App() {
 
       <div className="audio-state">
         System audio: {systemAudioState}
+        {listening ? ` · source: ${audioSource}` : ''}
       </div>
     </div>
   );

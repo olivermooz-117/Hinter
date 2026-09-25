@@ -13,6 +13,7 @@ Hinter is an always-on-top overlay that listens to your meeting (system audio + 
 | Floating always-on-top overlay | ✅ Done |
 | Audio capture (mic) | ✅ Done |
 | System audio capture | ✅ Done (Electron loopback + PipeWire/PulseAudio detection) |
+| Browser tab/screen audio | ✅ Done (getDisplayMedia + mic mix, optional) |
 | Live transcription (Gemini Live) | ✅ Done |
 | Flask backend + WebSocket | ✅ Done |
 | LLM suggestion engine | ✅ Done (Gemini, debounced) |
@@ -82,6 +83,33 @@ Run the test suites with:
 npm test
 npm run build
 npm run backend:test
+```
+
+
+## Audio capture paths
+
+| Environment | Sources | Notes |
+|-------------|---------|--------|
+| **Electron (Linux)** | Mic + `Hinter-System-Audio` (PipeWire/Pulse monitor) | Auto-mixed when `pactl` monitors exist |
+| **Browser (Vercel / Chrome)** | Mic only, or mic + **tab/screen audio** | Check “Share tab/screen audio” then enable **Share audio** in the browser dialog |
+| **Fallback** | Mic only | Used when system/display capture fails |
+
+### Event contract (Socket.IO)
+
+| Direction | Event | Purpose |
+|-----------|--------|---------|
+| Client → server | `transcription:start` | Open Gemini Live session; clears rolling transcript buffer |
+| Client → server | `transcription:audio` | Binary PCM 16-bit mono @ 16 kHz |
+| Client → server | `transcription:stop` | Close live session |
+| Server → client | `transcription:interim` | Partial text (UI italic) |
+| Server → client | `transcription:final` / `transcript` | Finalized line |
+| Server → client | `transcription_error` | STT failure message |
+
+Requires `pulseaudio-utils` on Linux for monitor detection:
+
+```bash
+sudo apt install pulseaudio-utils
+pactl list short sources | grep monitor
 ```
 
 ## Data flow

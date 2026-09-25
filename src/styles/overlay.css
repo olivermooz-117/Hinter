@@ -218,6 +218,29 @@ body,
   white-space: pre-wrap;
 }
 
+
+.share-toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 11px;
+  color: var(--text-faint, #888);
+  margin-bottom: 8px;
+  -webkit-app-region: no-drag;
+  user-select: none;
+}
+
+.share-toggle input {
+  accent-color: #7c8cff;
+}
+
+.audio-state {
+  font-size: 10px;
+  color: var(--text-faint, #666);
+  margin-top: 6px;
+  -webkit-app-region: no-drag;
+}
+
 .hint {
   color: var(--text-faint);
   font-style: italic;

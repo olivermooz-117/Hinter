@@ -89,9 +89,32 @@ function listLinuxSources() {
 }
 
 function listLinuxMonitorSources() {
-  return listLinuxSources()
+  const monitors = listLinuxSources()
     .filter((source) => source.name?.endsWith('.monitor'))
     .map((source) => source.name);
+
+  // Prefer the default sink's monitor when available.
+  try {
+    const info = runPactl(['info']);
+    const match = /Default Sink:\s*(.+)/i.exec(info || '');
+    if (match) {
+      const preferred = `${match[1].trim()}.monitor`;
+      const idx = monitors.indexOf(preferred);
+      if (idx > 0) {
+        monitors.splice(idx, 1);
+        monitors.unshift(preferred);
+      } else if (idx === -1 && monitors.length) {
+        console.info(
+          '[system-audio] default sink monitor not listed yet:',
+          preferred
+        );
+      }
+    }
+  } catch (error) {
+    console.warn('[system-audio] could not read default sink:', error.message);
+  }
+
+  return monitors;
 }
 
 /**
