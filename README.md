@@ -38,33 +38,21 @@ npm start
 
 ## Deployment
 
-The web frontend is deployed to Vercel and the Flask + Socket.IO backend is
-deployed to Render. Electron remains a local desktop application and uses the
-same backend URL configuration.
+Hinter is deployed as a full-stack application on Vercel. Both the web
+frontend and Flask + Socket.IO backend are configured within the Vercel
+project.
 
-Render uses:
+**Live demo:** [Try live demo](https://hinter-one.vercel.app)
 
-```text
-Build command: pip install -r backend/requirements.txt
-Start command: cd backend && python app.py
-```
+### Environment variables
 
-Configure these environment variables in Render. `PORT` is supplied by Render:
+Configure the following variables in Vercel under
+**Project → Settings → Environment Variables**:
 
 ```text
 GEMINI_API_KEY=...
-GEMINI_SUGGESTION_MODEL=gemini-2.5-flash
-FRONTEND_URL=https://your-app.vercel.app
-```
-
-Configure this environment variable in Vercel:
-
-```text
-VITE_BACKEND_URL=https://your-backend.onrender.com
-```
-
-The actual Gemini API key belongs only in Render. It must not be placed in a
-`VITE_*` variable or shipped to React, Vite, or the Electron renderer.
+GEMINI_SUGGESTION_MODEL=gemini-3.6-flash
+FRONTEND_URL=https://hinter-one.vercel.app
 
 ## Real-time transcription
 
