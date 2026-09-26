@@ -13,6 +13,11 @@ const mockUseWhisper = useWhisper;
 describe('App', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    delete window.hinter;
+    Object.defineProperty(window.navigator, 'userAgent', {
+      value: 'Mozilla/5.0',
+      configurable: true,
+    });
     mockUseBackend.mockReturnValue({
       status: { label: 'ready', kind: 'ready' },
       setStatus: vi.fn(),
@@ -32,9 +37,11 @@ describe('App', () => {
     });
   });
 
-  it('renders the overlay with title', () => {
+  it('renders marketing homepage with live demo in browser', () => {
     render(<App />);
-    expect(screen.getByText('Hinter')).toBeInTheDocument();
+    expect(screen.getByText(/Transparent meeting co-pilot/i)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Listen' })).toBeInTheDocument();
+    expect(screen.getByText('Live demo')).toBeInTheDocument();
   });
 
   it('shows Listen button when not listening', () => {
@@ -92,12 +99,12 @@ describe('App', () => {
     expect(start).toHaveBeenCalled();
   });
 
-  it('displays transcripts when available', () => {
+  it('displays transcripts section', () => {
     render(<App />);
     expect(screen.getByText('Live transcript')).toBeInTheDocument();
   });
 
-  it('displays suggestions when available', () => {
+  it('displays suggestions section', () => {
     render(<App />);
     expect(screen.getByText('AI suggestion')).toBeInTheDocument();
   });
@@ -107,5 +114,12 @@ describe('App', () => {
     expect(
       screen.getByText(/Share tab\/screen audio/i)
     ).toBeInTheDocument();
+  });
+
+  it('renders overlay-only in Electron', () => {
+    window.hinter = { systemAudio: {} };
+    render(<App />);
+    expect(screen.queryByText(/Transparent meeting co-pilot/i)).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Listen' })).toBeInTheDocument();
   });
 });

@@ -1,3 +1,13 @@
+html, body, #root {
+  margin: 0;
+  padding: 0;
+  min-height: 100%;
+}
+
+body {
+  background: #07070a;
+}
+
 :root {
   --bg-panel: rgba(14, 14, 18, 0.82);
   --bg-panel-soft: rgba(255, 255, 255, 0.04);
