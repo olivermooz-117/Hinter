@@ -95,6 +95,7 @@ export function useWhisper({ onTranscript, onInterim, onError, socket }) {
   const processorRef = useRef(null);
   const socketHandlersRef = useRef(null);
   const listeningRef = useRef(false);
+  const stopRef = useRef(() => {});
 
   useEffect(() => {
     let cancelled = false;
@@ -234,6 +235,8 @@ export function useWhisper({ onTranscript, onInterim, onError, socket }) {
     setAudioSource('mic');
   }, [detachSocketHandlers, stopLevelMeter]);
 
+  stopRef.current = stop;
+
   /**
    * Browser: share a tab/window/screen with audio.
    * Chrome often requires video:true; we keep audio tracks only.
@@ -273,8 +276,13 @@ export function useWhisper({ onTranscript, onInterim, onError, socket }) {
       track.onended = () => {
         if (listeningRef.current) {
           onError?.(
-            'Tab/screen share ended. Stop and start listening again if needed.'
+            'Tab/screen share ended — listening stopped.'
           );
+          try {
+            stopRef.current?.();
+          } catch (_) {
+            /* ignore */
+          }
         }
       };
     });
@@ -445,21 +453,33 @@ export function useWhisper({ onTranscript, onInterim, onError, socket }) {
         sourceLabel = 'mic';
       }
 
-      // Browser tab/screen audio (explicit opt-in)
-      if (shareDisplayAudio && sourceLabel === 'mic') {
+      // Browser tab/screen audio (explicit opt-in).
+      // Can run alone or on top of Electron system-audio mix.
+      if (shareDisplayAudio) {
         try {
           const displayStream = await captureDisplayAudio();
           displayStreamRef.current = displayStream;
-          combinedStream = await mixStreams(micStream, displayStream);
-          sourceLabel = 'mic+display';
-          setSystemAudioState('display');
-          console.info('[display-audio] mic + tab/screen audio mixed');
+          combinedStream = await mixStreams(
+            combinedStream,
+            displayStream
+          );
+          sourceLabel =
+            sourceLabel === 'mic'
+              ? 'mic+display'
+              : `${sourceLabel}+display`;
+          if (sourceLabel.includes('system')) {
+            setSystemAudioState('active+display');
+          } else {
+            setSystemAudioState('display');
+          }
+          console.info(
+            '[display-audio] mixed into pipeline:',
+            sourceLabel
+          );
         } catch (error) {
           console.warn('[display-audio] failed:', error);
-          setSystemAudioState('error');
           onError?.(error.message || String(error));
-          combinedStream = micStream;
-          sourceLabel = 'mic';
+          // Keep existing combinedStream (mic or mic+system)
         }
       }
 

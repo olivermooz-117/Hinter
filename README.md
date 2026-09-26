@@ -54,6 +54,7 @@ Configure the following variables in Vercel under
 GEMINI_API_KEY=...
 GEMINI_SUGGESTION_MODEL=gemini-3.6-flash
 FRONTEND_URL=https://hinter-one.vercel.app
+```
 
 ## Real-time transcription
 

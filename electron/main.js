@@ -145,11 +145,13 @@ function ensureLinuxSystemAudioSource() {
     return true;
   }
 
-  const monitor = sources.find(
-    (source) => source.name?.endsWith('.monitor')
-  );
+  // Prefer default-sink monitor (listLinuxMonitorSources already sorts).
+  const preferredMonitors = listLinuxMonitorSources();
+  const monitorName =
+    preferredMonitors[0] ||
+    sources.find((source) => source.name?.endsWith('.monitor'))?.name;
 
-  if (!monitor) {
+  if (!monitorName) {
     console.warn(
       '[system-audio] No Linux monitor source is available yet.'
     );
@@ -160,13 +162,13 @@ function ensureLinuxSystemAudioSource() {
   try {
     console.info(
       '[system-audio] Creating Hinter-System-Audio from:',
-      monitor.name
+      monitorName
     );
 
     const moduleId = runPactl([
       'load-module',
       'module-remap-source',
-      `master=${monitor.name}`,
+      `master=${monitorName}`,
       `source_name=${SYSTEM_AUDIO_SOURCE}`,
       `source_properties=device.description=${SYSTEM_AUDIO_DESCRIPTION}`,
       'channels=2',

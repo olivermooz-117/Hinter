@@ -108,11 +108,13 @@ def test_session_creation_and_persistence():
 
         assert response.status_code == 200
 
+        # HTTP fallback path uses _http_state (no socket sid)
         app._maybe_suggest()
 
         assert mock_client.models.generate_content.called
 
-        session_id = app._state["session_id"]
+        session_id = app._http_state["session_id"]
+        assert session_id is not None
 
         response = client.get(f"/api/sessions/{session_id}")
 

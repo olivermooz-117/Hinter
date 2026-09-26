@@ -110,13 +110,41 @@ else:
 SessionLocal = init_db(DATABASE_PATH)
 
 
-_state = {
+# Per-socket-client isolation (sid → client bag).
+# Avoids multi-tab / multi-user transcript and suggestion crosstalk.
+_clients: dict[str, dict] = {}
+_clients_lock = threading.Lock()
+# Legacy single-process bag used only by HTTP fallbacks without a socket sid.
+_http_state = {
     "session_id": None,
     "transcript": [],
     "last_suggestion_at": 0.0,
-    "suggestion_lock": threading.Lock(),
-    "live_sessions": {},
 }
+_suggestion_lock = threading.Lock()
+
+
+def _get_client(sid: str) -> dict:
+    with _clients_lock:
+        client = _clients.get(sid)
+        if client is None:
+            client = {
+                "session_id": None,
+                "transcript": [],
+                "last_suggestion_at": 0.0,
+                "live": None,
+            }
+            _clients[sid] = client
+        return client
+
+
+def _drop_client(sid: str) -> None:
+    with _clients_lock:
+        client = _clients.pop(sid, None)
+    if client and client.get("live"):
+        try:
+            client["live"].stop()
+        except Exception:
+            pass
 
 
 SUGGESTION_DEBOUNCE_SEC = float(
@@ -127,9 +155,11 @@ SUGGESTION_DEBOUNCE_SEC = float(
 )
 
 
-def _ensure_session() -> int:
-    if _state["session_id"] is not None:
-        return _state["session_id"]
+def _ensure_session(sid: str | None = None) -> int:
+    bag = _get_client(sid) if sid else _http_state
+
+    if bag["session_id"] is not None:
+        return bag["session_id"]
 
     db = SessionLocal()
 
@@ -145,7 +175,7 @@ def _ensure_session() -> int:
         db.commit()
         db.refresh(session)
 
-        _state["session_id"] = session.id
+        bag["session_id"] = session.id
 
         return session.id
 
@@ -153,8 +183,8 @@ def _ensure_session() -> int:
         db.close()
 
 
-def _save_transcript(text: str) -> None:
-    session_id = _ensure_session()
+def _save_transcript(text: str, sid: str | None = None) -> None:
+    session_id = _ensure_session(sid)
 
     db = SessionLocal()
 
@@ -172,8 +202,8 @@ def _save_transcript(text: str) -> None:
         db.close()
 
 
-def _save_suggestion(text: str) -> None:
-    session_id = _ensure_session()
+def _save_suggestion(text: str, sid: str | None = None) -> None:
+    session_id = _ensure_session(sid)
 
     db = SessionLocal()
 
@@ -219,19 +249,21 @@ def _is_quota_error(error: Exception) -> bool:
     )
 
 
-def _maybe_suggest() -> None:
-    with _state["suggestion_lock"]:
+def _maybe_suggest(sid: str | None = None) -> None:
+    bag = _get_client(sid) if sid else _http_state
+
+    with _suggestion_lock:
         now = time.time()
 
         if (
             now
-            - _state["last_suggestion_at"]
+            - bag["last_suggestion_at"]
             < SUGGESTION_DEBOUNCE_SEC
         ):
             return
 
-        _state["last_suggestion_at"] = now
-        lines = list(_state["transcript"])
+        bag["last_suggestion_at"] = now
+        lines = list(bag["transcript"])
 
     if not lines:
         return
@@ -240,34 +272,40 @@ def _maybe_suggest() -> None:
         text = generate_suggestions(lines)
 
         if text and text != "(listening)":
-            _save_suggestion(text)
+            _save_suggestion(text, sid)
 
-            socketio.emit(
-                "suggestion",
-                {"text": text},
-            )
+            if sid:
+                socketio.emit(
+                    "suggestion",
+                    {"text": text},
+                    to=sid,
+                )
+            else:
+                socketio.emit(
+                    "suggestion",
+                    {"text": text},
+                )
 
     except Exception as error:
-        if _is_quota_error(error):
-            socketio.emit(
-                "error",
-                {
-                    "text": None,
-                    "error": "quota",
-                    "message": (
-                        "Suggestion quota was reached; "
-                        "transcription still works."
-                    ),
-                },
-            )
+        payload = (
+            {
+                "text": None,
+                "error": "quota",
+                "message": (
+                    "Suggestion quota was reached; "
+                    "transcription still works."
+                ),
+            }
+            if _is_quota_error(error)
+            else {
+                "message": f"Suggestion error: {error}",
+            }
+        )
 
+        if sid:
+            socketio.emit("error", payload, to=sid)
         else:
-            socketio.emit(
-                "error",
-                {
-                    "message": f"Suggestion error: {error}",
-                },
-            )
+            socketio.emit("error", payload)
 
 
 def _handle_live_transcription(
@@ -299,10 +337,11 @@ def _handle_live_transcription(
         cleaned,
     )
 
-    _state["transcript"].append(cleaned)
-    _state["transcript"] = _state["transcript"][-200:]
+    client = _get_client(sid)
+    client["transcript"].append(cleaned)
+    client["transcript"] = client["transcript"][-200:]
 
-    _save_transcript(cleaned)
+    _save_transcript(cleaned, sid)
 
     socketio.emit(
         "transcription:final",
@@ -317,7 +356,8 @@ def _handle_live_transcription(
     )
 
     socketio.start_background_task(
-        _maybe_suggest
+        _maybe_suggest,
+        sid,
     )
 
 
@@ -350,7 +390,7 @@ def health():
         {
             "ok": True,
             "gemini_key": gemini_key,
-            "session_id": _state["session_id"],
+            "session_id": None,  # per-client; see socket start_session
         }
     )
 
@@ -400,8 +440,8 @@ def api_transcribe():
         ), 500
 
     if text:
-        _state["transcript"].append(text)
-        _state["transcript"] = _state["transcript"][-200:]
+        _http_state["transcript"].append(text)
+        _http_state["transcript"] = _http_state["transcript"][-200:]
 
         _save_transcript(text)
 
@@ -433,8 +473,8 @@ def api_transcript_text():
             {"error": "empty"}
         ), 400
 
-    _state["transcript"].append(text)
-    _state["transcript"] = _state["transcript"][-200:]
+    _http_state["transcript"].append(text)
+    _http_state["transcript"] = _http_state["transcript"][-200:]
 
     _save_transcript(text)
 
@@ -544,18 +584,20 @@ def on_connect():
         "status",
         {
             "message": "connected",
-            "session_id": _state["session_id"],
+            "session_id": None,
         },
     )
 
 
 @socketio.on("start_session")
 def on_start_session():
-    _state["session_id"] = None
-    _state["transcript"] = []
-    _state["last_suggestion_at"] = 0.0
+    sid = request.sid
+    client = _get_client(sid)
+    client["session_id"] = None
+    client["transcript"] = []
+    client["last_suggestion_at"] = 0.0
 
-    session_id = _ensure_session()
+    session_id = _ensure_session(sid)
 
     emit(
         "status",
@@ -568,7 +610,9 @@ def on_start_session():
 
 @socketio.on("end_session")
 def on_end_session():
-    session_id = _state["session_id"]
+    sid = request.sid
+    client = _get_client(sid)
+    session_id = client["session_id"]
 
     if session_id is None:
         return
@@ -603,20 +647,17 @@ def on_end_session():
 @socketio.on("transcription:start")
 def on_transcription_start():
     sid = request.sid
+    client = _get_client(sid)
 
-    existing = _state["live_sessions"].pop(
-        sid,
-        None,
-    )
-
+    existing = client.get("live")
     if existing:
         existing.stop()
+        client["live"] = None
 
-    # Fresh rolling transcript for this listening session (shared process state).
-    # Prevents stale lines from a previous Listen cycle feeding suggestions.
-    _state["transcript"] = []
-    _state["last_suggestion_at"] = 0.0
-    _ensure_session()
+    # Fresh rolling transcript for this client only.
+    client["transcript"] = []
+    client["last_suggestion_at"] = 0.0
+    _ensure_session(sid)
 
     session = LiveTranscriptionSession(
         lambda text, final: _handle_live_transcription(
@@ -630,7 +671,7 @@ def on_transcription_start():
         ),
     )
 
-    _state["live_sessions"][sid] = session
+    client["live"] = session
 
     session.start()
 
@@ -648,9 +689,7 @@ def on_transcription_start():
 def on_transcription_audio(audio):
     sid = request.sid
 
-    session = _state["live_sessions"].get(
-        sid
-    )
+    session = _get_client(sid).get("live")
 
     if not session:
         emit(
@@ -705,14 +744,12 @@ def on_transcription_audio(audio):
 @socketio.on("transcription:stop")
 def on_transcription_stop():
     sid = request.sid
+    client = _get_client(sid)
 
-    session = _state["live_sessions"].pop(
-        sid,
-        None,
-    )
-
+    session = client.get("live")
     if session:
         session.stop()
+        client["live"] = None
 
     print(
         "[socket] transcription stopped:",
@@ -727,14 +764,7 @@ def on_transcription_stop():
 @socketio.on("disconnect")
 def on_disconnect():
     sid = request.sid
-
-    session = _state["live_sessions"].pop(
-        sid,
-        None,
-    )
-
-    if session:
-        session.stop()
+    _drop_client(sid)
 
     print(
         "[socket] client disconnected:",
