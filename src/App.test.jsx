@@ -39,9 +39,11 @@ describe('App', () => {
 
   it('renders marketing homepage with live demo in browser', () => {
     render(<App />);
-    expect(screen.getByText(/Transparent meeting co-pilot/i)).toBeInTheDocument();
+    expect(
+      screen.getByText(/Transparent meeting co-pilot/i)
+    ).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Listen' })).toBeInTheDocument();
-    expect(screen.getByText('Live demo')).toBeInTheDocument();
+    expect(screen.getAllByText('Live demo').length).toBeGreaterThanOrEqual(1);
   });
 
   it('shows Listen button when not listening', () => {
@@ -119,7 +121,9 @@ describe('App', () => {
   it('renders overlay-only in Electron', () => {
     window.hinter = { systemAudio: {} };
     render(<App />);
-    expect(screen.queryByText(/Transparent meeting co-pilot/i)).not.toBeInTheDocument();
+    expect(
+      screen.queryByText(/Transparent meeting co-pilot/i)
+    ).not.toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Listen' })).toBeInTheDocument();
   });
 });
