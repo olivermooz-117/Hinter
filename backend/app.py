@@ -348,12 +348,8 @@ def _handle_live_transcription(
         {"text": cleaned},
         to=sid,
     )
-
-    socketio.emit(
-        "transcript",
-        {"text": cleaned},
-        to=sid,
-    )
+    # Legacy "transcript" event intentionally not emitted here —
+    # prevents duplicate UI lines when older clients also listened to both.
 
     socketio.start_background_task(
         _maybe_suggest,

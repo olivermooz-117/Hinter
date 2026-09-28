@@ -2,7 +2,11 @@
 
 **A transparent, real-time AI meeting co-pilot.**
 
-Hinter is an always-on-top overlay that listens to your meeting (system audio + mic), transcribes it live, and surfaces short, useful suggestions. It is designed to be **disclosed and openly used**, like Otter.ai or Google Meet's AI features.
+Hinter listens to your meeting (mic, optional tab audio, or Linux system audio),
+transcribes live with Gemini, and surfaces short AI suggestions. It is designed
+to be **disclosed and openly used** — not a hidden assist tool.
+
+**Live demo (homepage + listener):** https://hinter-one.vercel.app
 
 ---
 
@@ -10,45 +14,66 @@ Hinter is an always-on-top overlay that listens to your meeting (system audio + 
 
 | Milestone | Status |
 |-----------|--------|
-| Floating always-on-top overlay | ✅ Done |
-| Audio capture (mic) | ✅ Done |
-| System audio capture | ✅ Done (Electron loopback + PipeWire/PulseAudio detection) |
-| Browser tab/screen audio | ✅ Done (getDisplayMedia + mic mix, optional) |
-| Live transcription (Gemini Live) | ✅ Done |
-| Flask backend + WebSocket | ✅ Done |
-| LLM suggestion engine | ✅ Done (Gemini, debounced) |
-| React UI migration | ✅ Done |
-| Session history (SQLAlchemy) | ✅ Done |
+| Marketing homepage + embedded live demo | Done |
+| Floating always-on-top Electron overlay | Done |
+| Mic + browser tab/screen audio | Done |
+| Linux system audio (PipeWire/Pulse) | Done |
+| Gemini Live transcription | Done |
+| Flask + Socket.IO backend | Done |
+| Debounced LLM suggestions | Done |
+| Per-client session isolation | Done |
+| Session history (SQLAlchemy / SQLite) | Done |
 
 ---
 
-## Run it
+## Surfaces
+
+| Surface | What you get | How to open |
+|---------|--------------|-------------|
+| **Web (primary)** | Homepage + live Listen panel | https://hinter-one.vercel.app |
+| **Local browser** | Same UI as production | `npm run backend` then `npx vite` → http://127.0.0.1:5173 |
+| **Electron overlay** | Compact always-on-top panel + system audio | `npm run backend` then `npm run dev` |
+| **GitHub Pages** | Static marketing mirror; **Try live** points to Vercel | https://olivermooz-117.github.io/Hinter/ |
+
+---
+
+## Run locally
 
 ```bash
-# 1. Install
+# 1. Install frontend deps
 npm install
 
-# 2. Add your Gemini API key
+# 2. Backend venv + deps
+cd backend
+python3 -m venv venv
+source venv/bin/activate
+pip install -r requirements.txt
+cd ..
+
+# 3. Env
 cp .env.example .env
 # edit .env → set GEMINI_API_KEY=...
 
-# 3. Start the backend and app
+# 4a. Browser homepage (recommended for demos)
+npm run backend          # terminal 1 — http://127.0.0.1:5000
+npx vite                 # terminal 2 — http://127.0.0.1:5173
+
+# 4b. Electron overlay (desktop meetings / system audio)
 npm run backend
-npm start
+npm run dev              # Vite + Electron
 ```
 
-## Deployment
+---
 
-Hinter is deployed as a full-stack application on Vercel. Both the web
-frontend and Flask + Socket.IO backend are configured within the Vercel
-project.
+## Deployment (Vercel)
 
-**Live demo:** [Try live demo](https://hinter-one.vercel.app)
+Full-stack on Vercel: Vite frontend + Flask backend (`vercel.json`).
+
+**Production URL:** https://hinter-one.vercel.app
 
 ### Environment variables
 
-Configure the following variables in Vercel under
-**Project → Settings → Environment Variables**:
+In **Project → Settings → Environment Variables**:
 
 ```text
 GEMINI_API_KEY=...
@@ -56,66 +81,58 @@ GEMINI_SUGGESTION_MODEL=gemini-3.6-flash
 FRONTEND_URL=https://hinter-one.vercel.app
 ```
 
+Optional: `GEMINI_TRANSCRIPTION_MODEL`, `HINTER_SUGGESTION_DEBOUNCE`.
+
+---
+
 ## Real-time transcription
 
-Hinter keeps one Gemini Live API connection open for each listening session
-using `gemini-3.5-transcribe-live` (override with
-`GEMINI_TRANSCRIPTION_MODEL`). The renderer mixes the microphone and the
-Linux `Hinter-System-Audio` virtual source, converts the result to mono,
-16-bit PCM at 16 kHz, and sends binary audio frames through Flask-SocketIO.
-Incremental transcription stays in the live session; only finalized segments
-are persisted and sent to the debounced suggestion engine. The legacy
-`/api/transcribe` endpoint remains available as a fallback for older clients.
-
-System-audio capture currently depends on Linux PipeWire/PulseAudio and the
-`Hinter-System-Audio` source. If it is unavailable, Hinter falls back to the
-physical microphone. The source must be available before listening starts.
-
-Run the frontend and backend separately during development when needed:
-
-```bash
-npm run backend
-npm run dev
-```
-
-Run the test suites with:
-
-```bash
-npm test
-npm run build
-npm run backend:test
-```
-
-
-## Audio capture paths
-
-| Environment | Sources | Notes |
-|-------------|---------|--------|
-| **Electron (Linux)** | Mic + `Hinter-System-Audio` (PipeWire/Pulse monitor) | Auto-mixed when `pactl` monitors exist |
-| **Browser (Vercel / Chrome)** | Mic only, or mic + **tab/screen audio** | Check “Share tab/screen audio” then enable **Share audio** in the browser dialog |
-| **Fallback** | Mic only | Used when system/display capture fails |
-
-### Event contract (Socket.IO)
+Each Listen session opens a Gemini Live connection (`gemini-3.5-transcribe-live`,
+overridable). The client sends 16-bit mono PCM @ 16 kHz over Socket.IO.
 
 | Direction | Event | Purpose |
 |-----------|--------|---------|
-| Client → server | `transcription:start` | Open Gemini Live session; clears rolling transcript buffer |
-| Client → server | `transcription:audio` | Binary PCM 16-bit mono @ 16 kHz |
+| Client → server | `transcription:start` | Open live session; clear this client's buffer |
+| Client → server | `transcription:audio` | Binary PCM chunks |
 | Client → server | `transcription:stop` | Close live session |
-| Server → client | `transcription:interim` | Partial text (UI italic) |
-| Server → client | `transcription:final` / `transcript` | Finalized line |
-| Server → client | `transcription_error` | STT failure message |
+| Server → client | `transcription:interim` | Partial text |
+| Server → client | `transcription:final` | Finalized line (UI + suggestions) |
+| Server → client | `suggestion` | Debounced AI card |
+| Server → client | `transcription_error` | STT failure |
 
-Requires `pulseaudio-utils` on Linux for monitor detection:
+HTTP `POST /api/transcribe` remains as a legacy fallback.
+
+### Audio capture paths
+
+| Environment | Sources | Notes |
+|-------------|---------|--------|
+| **Browser** | Mic, optional tab/screen audio | Check “Share tab/screen audio” |
+| **Electron (Linux)** | Mic + `Hinter-System-Audio` | Preferred default-sink monitor via `pactl` |
+| **Fallback** | Mic only | When system/display capture fails |
 
 ```bash
-sudo apt install pulseaudio-utils
+sudo apt install pulseaudio-utils   # Linux monitor detection
 pactl list short sources | grep monitor
 ```
 
-## Data flow
+---
 
-```text
-Audio → Flask → Gemini transcription → transcript
-Transcript → Flask → Gemini suggestions → Socket.IO → overlay
+## Tests
+
+```bash
+npm test
+npm run backend:test
 ```
+
+---
+
+## Portfolio notes
+
+See [docs/PORTFOLIO.md](docs/PORTFOLIO.md) for architecture diagram and the
+**transparent vs hidden** product decision.
+
+---
+
+## License
+
+MIT — see [LICENSE](LICENSE).

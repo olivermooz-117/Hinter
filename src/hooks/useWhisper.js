@@ -189,7 +189,6 @@ export function useWhisper({ onTranscript, onInterim, onError, socket }) {
     if (socket && handlers) {
       try {
         if (typeof socket.off === 'function') {
-          socket.off('transcript', handlers.transcript);
           socket.off('transcription:final', handlers.final);
           socket.off('transcription:interim', handlers.interim);
           socket.off('transcription_error', handlers.error);
@@ -334,15 +333,13 @@ export function useWhisper({ onTranscript, onInterim, onError, socket }) {
       };
 
       socketHandlersRef.current = {
-        transcript: handleFinal,
         final: handleFinal,
         interim: handleInterim,
         error: handleError,
       };
 
-      // Match backend emits: transcription:interim | transcription:final | transcript
+      // Live path: only transcription:final (avoid duplicate lines from legacy "transcript")
       socket.on('transcription:final', handleFinal);
-      socket.on('transcript', handleFinal);
       socket.on('transcription:interim', handleInterim);
       socket.on('transcription_error', handleError);
 
