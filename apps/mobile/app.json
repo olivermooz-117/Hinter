@@ -1,0 +1,42 @@
+{
+  "expo": {
+    "name": "Hinter",
+    "slug": "hinter",
+    "version": "0.4.0",
+    "orientation": "portrait",
+    "icon": "./assets/icon.png",
+    "userInterfaceStyle": "dark",
+    "splash": {
+      "image": "./assets/splash.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#0b1220"
+    },
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "com.hinter.app",
+      "infoPlist": {
+        "NSMicrophoneUsageDescription": "Hinter needs the microphone to transcribe your meeting and surface AI suggestions."
+      }
+    },
+    "android": {
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/adaptive-icon.png",
+        "backgroundColor": "#0b1220"
+      },
+      "package": "com.hinter.app",
+      "permissions": [
+        "RECORD_AUDIO"
+      ]
+    },
+    "plugins": [
+      [
+        "expo-av",
+        {
+          "microphonePermission": "Allow Hinter to access your microphone for live transcription."
+        }
+      ],
+      "expo-asset",
+      "expo-font"
+    ]
+  }
+}
