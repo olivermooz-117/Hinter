@@ -41,7 +41,24 @@ load_dotenv(ROOT / ".env")
 DEFAULT_FRONTEND_URLS = [
     "http://127.0.0.1:5173",
     "http://localhost:5173",
+    "https://hinter-one.vercel.app",
 ]
+
+def _extra_origins_from_env():
+    raw = os.environ.get("FRONTEND_URL", "")
+    return [o.strip() for o in raw.split(",") if o.strip()]
+
+def _is_allowed_origin(origin: str) -> bool:
+    if not origin:
+        return False
+    allowed = set(DEFAULT_FRONTEND_URLS + _extra_origins_from_env())
+    if origin in allowed:
+        return True
+    # Vercel production + preview deployments
+    if origin.endswith(".vercel.app"):
+        return True
+    return False
+
 
 
 configured_frontend_urls = [
