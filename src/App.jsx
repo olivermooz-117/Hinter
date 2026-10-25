@@ -1,3 +1,4 @@
+import { useEffect } from 'react';
 import Landing from './Landing';
 import ListenerPanel from './components/ListenerPanel';
 
@@ -8,11 +9,18 @@ function isElectronShell() {
 }
 
 /**
- * Browser → full homepage + embedded live listener (Cluely-style).
+ * Browser → full homepage + embedded live listener (scrollable).
  * Electron → compact always-on-top overlay only.
  */
 export default function App() {
-  if (isElectronShell()) {
+  const electron = isElectronShell();
+
+  useEffect(() => {
+    document.body.classList.toggle('hinter-electron', electron);
+    return () => document.body.classList.remove('hinter-electron');
+  }, [electron]);
+
+  if (electron) {
     return <ListenerPanel embedded={false} />;
   }
 

@@ -77,7 +77,7 @@ In **Project → Settings → Environment Variables**:
 
 ```text
 GEMINI_API_KEY=...
-GEMINI_SUGGESTION_MODEL=gemini-3.6-flash
+GEMINI_SUGGESTION_MODEL=gemini-2.5-flash
 FRONTEND_URL=https://hinter-one.vercel.app
 ```
 

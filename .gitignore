@@ -42,3 +42,11 @@ recordings/
 # Session history (future)
 data/
 sessions/
+# Expo
+.expo/
+dist/
+web-build/
+
+# Local DB / tmp
+*.db
+/tmp/

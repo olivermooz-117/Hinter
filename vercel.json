@@ -1,36 +1,9 @@
 {
-  "services": {
-    "frontend": {
-      "root": ".",
-      "framework": "vite"
-    },
-    "backend": {
-      "root": "backend",
-      "framework": "flask",
-      "entrypoint": "app:app"
-    }
-  },
+  "buildCommand": "cd apps/web && npm install && npm run build",
+  "outputDirectory": "apps/web/dist",
   "rewrites": [
-    {
-      "source": "/api(/.*)?",
-      "destination": {
-        "type": "service",
-        "service": "backend"
-      }
-    },
-    {
-      "source": "/socket.io(/.*)?",
-      "destination": {
-        "type": "service",
-        "service": "backend"
-      }
-    },
-    {
-      "source": "/(.*)",
-      "destination": {
-        "type": "service",
-        "service": "frontend"
-      }
-    }
+    { "source": "/api/(.*)", "destination": "/api/$1" },
+    { "source": "/socket.io/(.*)", "destination": "/socket.io/$1" },
+    { "source": "/(.*)", "destination": "/index.html" }
   ]
 }

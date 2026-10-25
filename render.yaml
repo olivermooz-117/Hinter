@@ -9,5 +9,9 @@ services:
         sync: false
       - key: GEMINI_SUGGESTION_MODEL
         value: gemini-2.5-flash
+      - key: SECRET_KEY
+        sync: false
       - key: FRONTEND_URL
+        sync: false
+      - key: DATABASE_URL
         sync: false
