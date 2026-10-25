@@ -89,21 +89,44 @@ app.config["SECRET_KEY"] = os.environ.get(
 )
 
 
+# Allow listed origins + any *.vercel.app preview
+def _cors_origin(origin):
+    if not origin:
+        return False
+    if origin in frontend_origins:
+        return True
+    if origin.endswith(".vercel.app"):
+        return True
+    return False
+
 CORS(
     app,
     resources={
         r"/api/*": {
-            "origins": frontend_origins,
+            "origins": frontend_origins + ["https://*.vercel.app"],
         }
     },
+    supports_credentials=False,
 )
+
+# Flask-CORS does not expand wildcards in all versions; add after_request fallback
+@app.after_request
+def _add_cors_headers(response):
+    origin = request.headers.get("Origin", "")
+    if origin in frontend_origins or origin.endswith(".vercel.app"):
+        response.headers["Access-Control-Allow-Origin"] = origin
+        response.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization"
+        response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
+    return response
+
 
 
 socketio = SocketIO(
     app,
-    cors_allowed_origins=frontend_origins,
+    cors_allowed_origins="*",  # browser still needs HTTP CORS for /api; Socket.IO accepts all
     async_mode="threading",
 )
+
 
 
 # Vercel's deployment filesystem is read-only.
