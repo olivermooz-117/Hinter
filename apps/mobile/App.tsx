@@ -1,202 +1,288 @@
-import { StatusBar } from 'expo-status-bar';
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
+  Alert,
   Pressable,
   SafeAreaView,
   ScrollView,
+  StatusBar,
   StyleSheet,
   Text,
   View,
 } from 'react-native';
+import {
+  AudioModule,
+  RecordingPresets,
+  setAudioModeAsync,
+  useAudioRecorder,
+  useAudioRecorderState,
+} from 'expo-audio';
+import * as FileSystem from 'expo-file-system';
 import { io, Socket } from 'socket.io-client';
-import { Audio } from 'expo-av';
 import { BACKEND_URL } from './src/config';
 
 type Tab = 'listen' | 'history';
-
-type SessionSummary = {
+type SessionRow = {
   id: number;
-  title: string | null;
-  started_at: string | null;
+  started_at?: string;
+  ended_at?: string | null;
+  transcript?: string;
+  suggestion_count?: number;
 };
 
-type SessionDetail = {
-  id: number;
-  title: string | null;
-  transcripts: { text: string; at: string }[];
-  suggestions: { text: string; at: string }[];
-};
+const SEGMENT_MS = 3500;
 
 export default function App() {
   const [tab, setTab] = useState<Tab>('listen');
-  const [backendOk, setBackendOk] = useState(false);
   const [status, setStatus] = useState('connecting…');
+  const [online, setOnline] = useState(false);
   const [listening, setListening] = useState(false);
   const [lines, setLines] = useState<string[]>([]);
-  const [interim, setInterim] = useState('');
   const [suggestion, setSuggestion] = useState('');
-  const [sessions, setSessions] = useState<SessionSummary[]>([]);
-  const [detail, setDetail] = useState<SessionDetail | null>(null);
-  const [historyLoading, setHistoryLoading] = useState(false);
-
+  const [sessions, setSessions] = useState<SessionRow[]>([]);
+  const [loadingHistory, setLoadingHistory] = useState(false);
   const socketRef = useRef<Socket | null>(null);
-  const recordingRef = useRef<Audio.Recording | null>(null);
-  const pumpRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const listeningRef = useRef(false);
+  const rotateTimer = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  const audioRecorder = useAudioRecorder({
+    ...RecordingPresets.HIGH_QUALITY,
+    isMeteringEnabled: true,
+  });
+  const recorderState = useAudioRecorderState(audioRecorder);
+
+  const statusColor = useMemo(() => {
+    if (!online) return '#b91c1c';
+    if (listening) return '#047857';
+    return '#6366f1';
+  }, [online, listening]);
 
   useEffect(() => {
     let cancelled = false;
-    fetch(`${BACKEND_URL}/api/health`)
-      .then((r) => r.json())
-      .then((data) => {
-        if (cancelled) return;
-        setBackendOk(!!data.ok);
-        setStatus(data.ok ? (data.gemini_key ? 'ready' : 'ready (no Gemini key)') : 'backend error');
-      })
-      .catch(() => {
+
+    (async () => {
+      try {
+        const perm = await AudioModule.requestRecordingPermissionsAsync();
+        if (!perm.granted) {
+          Alert.alert('Microphone', 'Permission is required to Listen on mobile.');
+        }
+        await setAudioModeAsync({
+          playsInSilentMode: true,
+          allowsRecording: true,
+        });
+      } catch (e) {
+        console.warn('audio setup', e);
+      }
+
+      try {
+        const res = await fetch(`${BACKEND_URL}/api/health`);
+        if (!res.ok) throw new Error(String(res.status));
         if (!cancelled) {
-          setBackendOk(false);
+          setOnline(true);
+          setStatus('ready');
+        }
+      } catch {
+        if (!cancelled) {
+          setOnline(false);
           setStatus('backend offline');
         }
-      });
+      }
+    })();
 
     const socket = io(BACKEND_URL, {
-      transports: ['websocket'],
+      transports: ['websocket', 'polling'],
       path: '/socket.io',
     });
     socketRef.current = socket;
 
     socket.on('connect', () => {
-      if (!cancelled) setStatus((s) => (s === 'backend offline' ? 'ready' : s));
+      if (!cancelled) {
+        setOnline(true);
+        if (!listeningRef.current) setStatus('ready');
+      }
     });
-    socket.on('transcription:interim', (payload: { text?: string } | string) => {
-      const text = typeof payload === 'string' ? payload : payload?.text || '';
-      setInterim(text.trim());
+    socket.on('disconnect', () => {
+      if (!cancelled) {
+        setOnline(false);
+        setStatus('disconnected');
+      }
     });
-    socket.on('transcription:final', (payload: { text?: string } | string) => {
-      const text = (typeof payload === 'string' ? payload : payload?.text || '').trim();
-      if (!text) return;
-      setInterim('');
-      setLines((prev) => [...prev, text].slice(-40));
+    socket.on('connect_error', () => {
+      if (!cancelled) {
+        setOnline(false);
+        setStatus('backend offline');
+      }
     });
-    socket.on('suggestion', (payload: { text?: string } | string) => {
-      const text = typeof payload === 'string' ? payload : payload?.text || '';
+    socket.on('transcription:interim', (payload: { text?: string }) => {
+      if (!payload?.text) return;
+      setLines((prev) => {
+        const next = [...prev];
+        if (next.length && next[next.length - 1].startsWith('…')) {
+          next[next.length - 1] = `… ${payload.text}`;
+        } else next.push(`… ${payload.text}`);
+        return next.slice(-40);
+      });
+    });
+    socket.on('transcription:final', (payload: { text?: string }) => {
+      if (!payload?.text) return;
+      setLines((prev) => {
+        const cleaned = prev.filter((l) => !l.startsWith('…'));
+        return [...cleaned, payload.text!].slice(-40);
+      });
+    });
+    socket.on('suggestion', (payload: { text?: string; suggestion?: string }) => {
+      const text = payload?.text || payload?.suggestion || '';
       if (text) setSuggestion(text);
-    });
-    socket.on('transcription_error', (payload: { message?: string }) => {
-      setStatus(payload?.message || 'STT error');
     });
 
     return () => {
       cancelled = true;
+      if (rotateTimer.current) clearInterval(rotateTimer.current);
       socket.disconnect();
       socketRef.current = null;
     };
   }, []);
 
-  const loadHistory = useCallback(() => {
-    setHistoryLoading(true);
-    fetch(`${BACKEND_URL}/api/sessions`)
-      .then((r) => r.json())
-      .then((data) => setSessions(Array.isArray(data) ? data : []))
-      .catch(() => setSessions([]))
-      .finally(() => setHistoryLoading(false));
+  const uploadSegment = useCallback(async (uri: string) => {
+    try {
+      const info = await FileSystem.getInfoAsync(uri);
+      if (!info.exists) return;
+
+      const form = new FormData();
+      form.append('audio', {
+        uri,
+        name: 'segment.m4a',
+        type: 'audio/m4a',
+      } as any);
+
+      const res = await fetch(`${BACKEND_URL}/api/transcribe`, {
+        method: 'POST',
+        body: form,
+      });
+      if (!res.ok) {
+        // fallback: try base64 JSON if server expects that
+        const b64 = await FileSystem.readAsStringAsync(uri, {
+          encoding: FileSystem.EncodingType.Base64,
+        });
+        await fetch(`${BACKEND_URL}/api/transcribe`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ audio_base64: b64, mime: 'audio/m4a' }),
+        });
+        return;
+      }
+      const data = await res.json().catch(() => null);
+      const text = data?.text || data?.transcript;
+      if (text) {
+        setLines((prev) => [...prev, text].slice(-40));
+      }
+    } catch (e) {
+      console.warn('upload segment', e);
+    }
+  }, []);
+
+  const startSegment = useCallback(async () => {
+    try {
+      await audioRecorder.prepareToRecordAsync();
+      audioRecorder.record();
+    } catch (e) {
+      console.warn('start segment', e);
+      setStatus('mic error');
+    }
+  }, [audioRecorder]);
+
+  const rotateSegment = useCallback(async () => {
+    if (!listeningRef.current) return;
+    try {
+      await audioRecorder.stop();
+      const uri = audioRecorder.uri;
+      if (uri) await uploadSegment(uri);
+    } catch (e) {
+      console.warn('rotate stop', e);
+    }
+    if (listeningRef.current) {
+      await startSegment();
+    }
+  }, [audioRecorder, startSegment, uploadSegment]);
+
+  const stopListening = useCallback(async () => {
+    listeningRef.current = false;
+    setListening(false);
+    if (rotateTimer.current) {
+      clearInterval(rotateTimer.current);
+      rotateTimer.current = null;
+    }
+    try {
+      if (recorderState.isRecording) {
+        await audioRecorder.stop();
+        const uri = audioRecorder.uri;
+        if (uri) await uploadSegment(uri);
+      }
+    } catch {
+      /* ignore */
+    }
+    socketRef.current?.emit('transcription:stop');
+    setStatus(online ? 'ready' : 'backend offline');
+  }, [audioRecorder, online, recorderState.isRecording, uploadSegment]);
+
+  const startListening = useCallback(async () => {
+    if (!online) {
+      Alert.alert('Backend offline', 'Wait for status ready, then try again.');
+      return;
+    }
+    const perm = await AudioModule.requestRecordingPermissionsAsync();
+    if (!perm.granted) {
+      Alert.alert('Microphone denied', 'Enable mic permission in system settings.');
+      return;
+    }
+
+    setLines([]);
+    setSuggestion('');
+    listeningRef.current = true;
+    setListening(true);
+    setStatus('listening…');
+    socketRef.current?.emit('transcription:start');
+
+    await startSegment();
+    rotateTimer.current = setInterval(() => {
+      rotateSegment();
+    }, SEGMENT_MS);
+  }, [online, rotateSegment, startSegment]);
+
+  const toggleListen = useCallback(() => {
+    if (listening) stopListening();
+    else startListening();
+  }, [listening, startListening, stopListening]);
+
+  const loadHistory = useCallback(async () => {
+    setLoadingHistory(true);
+    try {
+      const res = await fetch(`${BACKEND_URL}/api/sessions?limit=20`);
+      if (!res.ok) throw new Error(String(res.status));
+      const data = await res.json();
+      setSessions(Array.isArray(data) ? data : data.sessions || []);
+    } catch {
+      setSessions([]);
+    } finally {
+      setLoadingHistory(false);
+    }
   }, []);
 
   useEffect(() => {
     if (tab === 'history') loadHistory();
   }, [tab, loadHistory]);
 
-  const openSession = (id: number) => {
-    fetch(`${BACKEND_URL}/api/sessions/${id}`)
-      .then((r) => r.json())
-      .then((data) => setDetail(data))
-      .catch(() => setDetail(null));
-  };
-
-  const stopListening = useCallback(async () => {
-    if (pumpRef.current) {
-      clearInterval(pumpRef.current);
-      pumpRef.current = null;
-    }
-    const rec = recordingRef.current;
-    recordingRef.current = null;
-    if (rec) {
-      try {
-        await rec.stopAndUnloadAsync();
-      } catch {
-        /* ignore */
-      }
-    }
-    socketRef.current?.emit('transcription:stop');
-    socketRef.current?.emit('end_session');
-    setListening(false);
-    setInterim('');
-    setStatus(backendOk ? 'ready' : 'backend offline');
-  }, [backendOk]);
-
-  const startListening = useCallback(async () => {
-    if (!backendOk) {
-      setStatus('backend offline');
-      return;
-    }
-    const perm = await Audio.requestPermissionsAsync();
-    if (!perm.granted) {
-      setStatus('mic permission required');
-      return;
-    }
-    await Audio.setAudioModeAsync({
-      allowsRecordingIOS: true,
-      playsInSilentModeIOS: true,
-    });
-
-    const recording = new Audio.Recording();
-    await recording.prepareToRecordAsync({
-      android: {
-        extension: '.wav',
-        outputFormat: Audio.AndroidOutputFormat.DEFAULT,
-        audioEncoder: Audio.AndroidAudioEncoder.DEFAULT,
-        sampleRate: 16000,
-        numberOfChannels: 1,
-        bitRate: 128000,
-      },
-      ios: {
-        extension: '.wav',
-        audioQuality: Audio.IOSAudioQuality.HIGH,
-        sampleRate: 16000,
-        numberOfChannels: 1,
-        bitRate: 128000,
-        linearPCMBitDepth: 16,
-        linearPCMIsBigEndian: false,
-        linearPCMIsFloat: false,
-      },
-      web: {},
-    });
-    await recording.startAsync();
-    recordingRef.current = recording;
-
-    socketRef.current?.emit('start_session');
-    socketRef.current?.emit('transcription:start');
-    setListening(true);
-    setStatus('listening');
-    setSuggestion('');
-
-    // Note: streaming raw PCM from expo-av is limited; this mobile client
-    // prioritizes session UX + history. Full PCM streaming matches web/Electron
-    // via the same Socket.IO events when a native module is added later.
-  }, [backendOk]);
-
-  const toggle = async () => {
-    if (listening) await stopListening();
-    else await startListening();
-  };
-
   return (
-    <SafeAreaView style={styles.root}>
-      <StatusBar style="light" />
+    <SafeAreaView style={styles.safe}>
+      <StatusBar barStyle="dark-content" />
       <View style={styles.header}>
-        <Text style={styles.logo}>Hinter</Text>
-        <Text style={styles.tag}>Transparent · disclosed</Text>
+        <View style={styles.brandRow}>
+          <View style={styles.dot} />
+          <Text style={styles.brand}>Hinter</Text>
+        </View>
+        <View style={[styles.badge, { backgroundColor: statusColor + '22' }]}>
+          <Text style={[styles.badgeText, { color: statusColor }]}>{status}</Text>
+        </View>
       </View>
 
       <View style={styles.tabs}>
@@ -204,84 +290,68 @@ export default function App() {
           style={[styles.tab, tab === 'listen' && styles.tabActive]}
           onPress={() => setTab('listen')}
         >
-          <Text style={styles.tabText}>Listen</Text>
+          <Text style={[styles.tabText, tab === 'listen' && styles.tabTextActive]}>Listen</Text>
         </Pressable>
         <Pressable
           style={[styles.tab, tab === 'history' && styles.tabActive]}
           onPress={() => setTab('history')}
         >
-          <Text style={styles.tabText}>History</Text>
+          <Text style={[styles.tabText, tab === 'history' && styles.tabTextActive]}>History</Text>
         </Pressable>
       </View>
 
       {tab === 'listen' ? (
-        <View style={styles.panel}>
-          <View style={styles.statusRow}>
-            <View style={[styles.dot, backendOk ? styles.dotOk : styles.dotErr]} />
-            <Text style={styles.status}>{status}</Text>
-          </View>
-
+        <ScrollView contentContainerStyle={styles.body}>
           <Pressable
-            style={[styles.listenBtn, listening && styles.listenBtnActive]}
-            onPress={toggle}
+            style={[styles.listenBtn, listening && styles.listenBtnOn]}
+            onPress={toggleListen}
           >
-            <Text style={styles.listenBtnText}>
-              {listening ? 'Stop' : 'Start listening'}
+            <Text style={[styles.listenText, listening && styles.listenTextOn]}>
+              {listening ? 'Stop' : 'Listen'}
             </Text>
           </Pressable>
+          <Text style={styles.muted}>
+            Mic on device → short segments → same Render API. Speak clearly after tapping Listen.
+          </Text>
 
-          {suggestion ? (
-            <View style={styles.card}>
-              <Text style={styles.cardLabel}>Suggestion</Text>
-              <Text style={styles.cardBody}>{suggestion}</Text>
-            </View>
-          ) : null}
-
-          <Text style={styles.sectionLabel}>Transcript</Text>
-          <ScrollView style={styles.transcript}>
-            {lines.map((line, i) => (
-              <Text key={i} style={styles.line}>
-                {line}
-              </Text>
-            ))}
-            {interim ? <Text style={styles.interim}>{interim}</Text> : null}
-            {!lines.length && !interim ? (
-              <Text style={styles.muted}>
-                Press Start and speak. Transcript and AI suggestions appear here.
-              </Text>
-            ) : null}
-          </ScrollView>
-        </View>
-      ) : (
-        <ScrollView style={styles.panel}>
-          {historyLoading ? <ActivityIndicator color="#38bdf8" /> : null}
-          {sessions.map((s) => (
-            <Pressable key={s.id} style={styles.sessionRow} onPress={() => openSession(s.id)}>
-              <Text style={styles.sessionTitle}>{s.title || `Session #${s.id}`}</Text>
-              <Text style={styles.muted}>
-                {s.started_at ? new Date(s.started_at).toLocaleString() : '—'}
-              </Text>
-            </Pressable>
-          ))}
-          {!historyLoading && sessions.length === 0 ? (
-            <Text style={styles.muted}>No sessions yet.</Text>
-          ) : null}
-          {detail ? (
-            <View style={styles.detail}>
-              <Text style={styles.sectionLabel}>Transcript</Text>
-              {detail.transcripts?.map((t, i) => (
+          <Text style={styles.section}>Live transcript</Text>
+          <View style={styles.card}>
+            {lines.length === 0 ? (
+              <Text style={styles.muted}>Transcript appears here while listening.</Text>
+            ) : (
+              lines.map((line, i) => (
                 <Text key={i} style={styles.line}>
-                  {t.text}
+                  {line}
                 </Text>
-              ))}
-              <Text style={styles.sectionLabel}>Suggestions</Text>
-              {detail.suggestions?.map((s, i) => (
-                <Text key={i} style={[styles.line, styles.suggestLine]}>
-                  {s.text}
+              ))
+            )}
+          </View>
+
+          <Text style={styles.section}>AI suggestion</Text>
+          <View style={styles.card}>
+            <Text style={styles.suggestion}>{suggestion || 'Suggestions will appear here.'}</Text>
+          </View>
+        </ScrollView>
+      ) : (
+        <ScrollView contentContainerStyle={styles.body}>
+          <Pressable style={styles.refresh} onPress={loadHistory}>
+            <Text style={styles.refreshText}>Refresh</Text>
+          </Pressable>
+          {loadingHistory ? (
+            <ActivityIndicator color="#6366f1" />
+          ) : sessions.length === 0 ? (
+            <Text style={styles.muted}>No sessions yet.</Text>
+          ) : (
+            sessions.map((s) => (
+              <View key={s.id} style={styles.card}>
+                <Text style={styles.cardTitle}>Session #{s.id}</Text>
+                <Text style={styles.muted}>{s.started_at || '—'}</Text>
+                <Text style={styles.line} numberOfLines={4}>
+                  {s.transcript || '(empty)'}
                 </Text>
-              ))}
-            </View>
-          ) : null}
+              </View>
+            ))
+          )}
         </ScrollView>
       )}
     </SafeAreaView>
@@ -289,79 +359,74 @@ export default function App() {
 }
 
 const styles = StyleSheet.create({
-  root: { flex: 1, backgroundColor: '#0b1220' },
+  safe: { flex: 1, backgroundColor: '#f5f6fa' },
   header: {
     paddingHorizontal: 20,
-    paddingTop: 12,
-    paddingBottom: 8,
+    paddingTop: 8,
+    paddingBottom: 12,
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
   },
-  logo: { color: '#f8fafc', fontSize: 22, fontWeight: '700' },
-  tag: { color: '#64748b', fontSize: 12 },
-  tabs: { flexDirection: 'row', gap: 8, paddingHorizontal: 16, marginBottom: 8 },
-  tab: {
-    paddingVertical: 8,
-    paddingHorizontal: 16,
-    borderRadius: 8,
-    borderWidth: 1,
-    borderColor: 'transparent',
-  },
-  tabActive: {
-    backgroundColor: 'rgba(56,189,248,0.12)',
-    borderColor: 'rgba(56,189,248,0.35)',
-  },
-  tabText: { color: '#e2e8f0', fontWeight: '600' },
-  panel: { flex: 1, paddingHorizontal: 16, paddingBottom: 24 },
-  statusRow: { flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 16 },
-  dot: { width: 8, height: 8, borderRadius: 4 },
-  dotOk: { backgroundColor: '#34d399' },
-  dotErr: { backgroundColor: '#f87171' },
-  status: { color: '#94a3b8', fontSize: 13 },
-  listenBtn: {
-    backgroundColor: '#38bdf8',
-    paddingVertical: 14,
-    borderRadius: 12,
-    alignItems: 'center',
-    marginBottom: 16,
-  },
-  listenBtnActive: { backgroundColor: '#f87171' },
-  listenBtnText: { color: '#0b1220', fontWeight: '700', fontSize: 16 },
-  card: {
-    backgroundColor: '#0f172a',
-    borderRadius: 12,
-    borderWidth: 1,
-    borderColor: 'rgba(56,189,248,0.3)',
-    padding: 14,
-    marginBottom: 16,
-  },
-  cardLabel: {
-    color: '#64748b',
-    fontSize: 11,
-    textTransform: 'uppercase',
-    letterSpacing: 0.5,
-    marginBottom: 6,
-  },
-  cardBody: { color: '#7dd3fc', fontSize: 15, lineHeight: 22 },
-  sectionLabel: {
-    color: '#64748b',
-    fontSize: 11,
-    textTransform: 'uppercase',
-    letterSpacing: 0.5,
+  brandRow: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+  dot: { width: 10, height: 10, borderRadius: 5, backgroundColor: '#6366f1' },
+  brand: { fontSize: 20, fontWeight: '700', color: '#0f172a' },
+  badge: { paddingHorizontal: 10, paddingVertical: 4, borderRadius: 999 },
+  badgeText: { fontSize: 12, fontWeight: '600' },
+  tabs: {
+    flexDirection: 'row',
+    marginHorizontal: 16,
     marginBottom: 8,
-    marginTop: 8,
+    backgroundColor: '#e8eaf2',
+    borderRadius: 12,
+    padding: 4,
   },
-  transcript: { flex: 1 },
-  line: { color: '#cbd5e1', fontSize: 14, lineHeight: 20, marginBottom: 6 },
-  interim: { color: '#64748b', fontStyle: 'italic' },
-  muted: { color: '#64748b', fontSize: 14, lineHeight: 20 },
-  sessionRow: {
+  tab: { flex: 1, paddingVertical: 10, alignItems: 'center', borderRadius: 10 },
+  tabActive: { backgroundColor: '#fff' },
+  tabText: { color: '#64748b', fontWeight: '600' },
+  tabTextActive: { color: '#0f172a' },
+  body: { padding: 16, paddingBottom: 40, gap: 10 },
+  listenBtn: {
+    alignSelf: 'flex-start',
+    backgroundColor: '#fff',
+    borderWidth: 1,
+    borderColor: 'rgba(15,23,42,0.14)',
+    paddingHorizontal: 22,
     paddingVertical: 12,
-    borderBottomWidth: 1,
-    borderBottomColor: 'rgba(148,163,184,0.12)',
+    borderRadius: 999,
   },
-  sessionTitle: { color: '#f8fafc', fontWeight: '600', marginBottom: 2 },
-  detail: { marginTop: 16, paddingTop: 12 },
-  suggestLine: { color: '#7dd3fc' },
+  listenBtnOn: {
+    backgroundColor: 'rgba(16,185,129,0.15)',
+    borderColor: 'rgba(16,185,129,0.4)',
+  },
+  listenText: { fontWeight: '700', color: '#0f172a', fontSize: 16 },
+  listenTextOn: { color: '#047857' },
+  section: {
+    marginTop: 8,
+    fontSize: 12,
+    fontWeight: '700',
+    color: '#6366f1',
+    letterSpacing: 0.6,
+    textTransform: 'uppercase',
+  },
+  card: {
+    backgroundColor: '#fff',
+    borderRadius: 16,
+    padding: 14,
+    borderWidth: 1,
+    borderColor: 'rgba(15,23,42,0.08)',
+  },
+  cardTitle: { fontWeight: '700', color: '#0f172a', marginBottom: 6 },
+  muted: { color: '#64748b', lineHeight: 20 },
+  line: { color: '#0f172a', marginBottom: 4, lineHeight: 20 },
+  suggestion: { color: '#0f172a', lineHeight: 22 },
+  refresh: {
+    alignSelf: 'flex-start',
+    backgroundColor: '#6366f1',
+    paddingHorizontal: 14,
+    paddingVertical: 8,
+    borderRadius: 999,
+    marginBottom: 8,
+  },
+  refreshText: { color: '#fff', fontWeight: '600' },
 });
