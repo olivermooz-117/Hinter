@@ -30,7 +30,7 @@ type SessionRow = {
   suggestion_count?: number;
 };
 
-const SEGMENT_MS = 3500;
+const SEGMENT_MS = 6000;
 
 export default function App() {
   const [tab, setTab] = useState<Tab>('listen');
@@ -130,9 +130,17 @@ export default function App() {
         return [...cleaned, payload.text!].slice(-40);
       });
     });
+    socket.on('transcript', (payload: { text?: string }) => {
+      if (payload?.text) {
+        setLines((prev) => [...prev, payload.text!].slice(-40));
+      }
+    });
     socket.on('suggestion', (payload: { text?: string; suggestion?: string }) => {
       const text = payload?.text || payload?.suggestion || '';
       if (text) setSuggestion(text);
+    });
+    socket.on('error', (payload: { message?: string }) => {
+      if (payload?.message) setStatus(payload.message.slice(0, 40));
     });
 
     return () => {
@@ -146,38 +154,43 @@ export default function App() {
   const uploadSegment = useCallback(async (uri: string) => {
     try {
       const info = await FileSystem.getInfoAsync(uri);
-      if (!info.exists) return;
+      if (!info.exists) {
+        setStatus('no audio file');
+        return;
+      }
+      const size = (info as any).size ?? 0;
+      if (size > 0 && size < 500) {
+        setStatus('segment too small');
+        return;
+      }
 
       const form = new FormData();
       form.append('audio', {
         uri,
         name: 'segment.m4a',
-        type: 'audio/m4a',
+        type: 'audio/mp4',
       } as any);
 
       const res = await fetch(`${BACKEND_URL}/api/transcribe`, {
         method: 'POST',
         body: form,
       });
+      const data = await res.json().catch(() => null);
       if (!res.ok) {
-        // fallback: try base64 JSON if server expects that
-        const b64 = await FileSystem.readAsStringAsync(uri, {
-          encoding: FileSystem.EncodingType.Base64,
-        });
-        await fetch(`${BACKEND_URL}/api/transcribe`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ audio_base64: b64, mime: 'audio/m4a' }),
-        });
+        setStatus(`upload ${res.status}`);
+        console.warn('transcribe fail', res.status, data);
         return;
       }
-      const data = await res.json().catch(() => null);
-      const text = data?.text || data?.transcript;
+      const text = (data?.text || data?.transcript || '').trim();
       if (text) {
         setLines((prev) => [...prev, text].slice(-40));
+        setStatus('listening…');
+      } else {
+        setStatus('empty transcript');
       }
-    } catch (e) {
+    } catch (e: any) {
       console.warn('upload segment', e);
+      setStatus('upload error');
     }
   }, []);
 
